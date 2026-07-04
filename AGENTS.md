@@ -10,6 +10,11 @@
 ## Code Guidelines
 Follow the behavioral rules in @CODE_GUIDELINES.md
 
+## Test Images
+`test-images/` holds local sample images for manually testing the viewer.
+The image files there are git-ignored (only its `README.md` is tracked); put
+whatever samples you need for a test into that folder.
+
 ## Architecture Decision Records
 Notable and debatable architecture/design decisions are logged in `adr/`
 (see `adr/README.md` for the full process). In particular:

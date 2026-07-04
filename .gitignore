@@ -11,3 +11,7 @@
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local test images (keep the folder + its README, ignore the images)
+/test-images/*
+!/test-images/README.md
