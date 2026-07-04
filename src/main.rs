@@ -17,9 +17,6 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, WindowBuilder};
 
 const BG: u32 = 0x001E_1E1E; // dark background (softbuffer: 0x00RRGGBB)
-const BG_R: f32 = 0x1E as f32;
-const BG_G: f32 = 0x1E as f32;
-const BG_B: f32 = 0x1E as f32;
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
 
@@ -188,34 +185,47 @@ fn evict(cache: &mut HashMap<usize, DecodedImage>, current: usize, len: usize) {
     cache.retain(|&k, _| k == current || k == prev || k == next);
 }
 
-// Composites a pixel (0xAARRGGBB as r,g,b channels and alpha 0..1) over the background → 0x00RRGGBB.
+// Composites a pixel (r,g,b channels + alpha 0..1) over a background color → 0x00RRGGBB.
 #[inline(always)]
-fn pack_over_bg(r: f32, g: f32, b: f32, a: f32) -> u32 {
-    let r = (BG_R + (r - BG_R) * a) as u32;
-    let g = (BG_G + (g - BG_G) * a) as u32;
-    let b = (BG_B + (b - BG_B) * a) as u32;
+fn composite(r: f32, g: f32, b: f32, a: f32, br: f32, bg: f32, bb: f32) -> u32 {
+    let r = (br + (r - br) * a) as u32;
+    let g = (bg + (g - bg) * a) as u32;
+    let b = (bb + (b - bb) * a) as u32;
     (r << 16) | (g << 8) | b
+}
+
+// Checkerboard color (screen-space, 8px cells) shown behind transparent pixels.
+#[inline(always)]
+fn checker(dx: usize, dy: usize) -> (f32, f32, f32) {
+    if (((dx >> 3) + (dy >> 3)) & 1) == 0 {
+        (0x2B as f32, 0x2B as f32, 0x2B as f32)
+    } else {
+        (0x35 as f32, 0x35 as f32, 0x35 as f32)
+    }
 }
 
 // Nearest neighbor: crisp pixel edges when zooming in (scale >= 1), no blur.
 #[inline(always)]
-fn sample_nearest(img: &DecodedImage, sx: f32, sy: f32) -> u32 {
+fn sample_nearest(img: &DecodedImage, sx: f32, sy: f32, br: f32, bg: f32, bb: f32) -> u32 {
     if sx < 0.0 || sy < 0.0 || sx >= img.w as f32 || sy >= img.h as f32 {
         return BG;
     }
     let p = img.px[sy as usize * img.w as usize + sx as usize];
     let a = ((p >> 24) & 0xFF) as f32 / 255.0;
-    pack_over_bg(
+    composite(
         ((p >> 16) & 0xFF) as f32,
         ((p >> 8) & 0xFF) as f32,
         (p & 0xFF) as f32,
         a,
+        br,
+        bg,
+        bb,
     )
 }
 
 // Bilinear filtering: smoothing when zooming out (scale < 1), no aliasing.
 #[inline(always)]
-fn sample(img: &DecodedImage, sx: f32, sy: f32) -> u32 {
+fn sample(img: &DecodedImage, sx: f32, sy: f32, br: f32, bg: f32, bb: f32) -> u32 {
     if sx < 0.0 || sy < 0.0 || sx > (img.w - 1) as f32 || sy > (img.h - 1) as f32 {
         return BG;
     }
@@ -240,7 +250,7 @@ fn sample(img: &DecodedImage, sx: f32, sy: f32) -> u32 {
     let r = bl(ch(p00, 16), ch(p10, 16), ch(p01, 16), ch(p11, 16));
     let g = bl(ch(p00, 8), ch(p10, 8), ch(p01, 8), ch(p11, 8));
     let b = bl(ch(p00, 0), ch(p10, 0), ch(p01, 0), ch(p11, 0));
-    pack_over_bg(r, g, b, a)
+    composite(r, g, b, a, br, bg, bb)
 }
 
 fn draw(img: Option<&DecodedImage>, buf: &mut [u32], ww: u32, wh: u32, scale: f32, cx: f32, cy: f32) {
@@ -257,10 +267,11 @@ fn draw(img: Option<&DecodedImage>, buf: &mut [u32], ww: u32, wh: u32, scale: f3
                     let sy = cy + (dy as f32 - wh_f / 2.0) / scale;
                     for (dx, px) in row.iter_mut().enumerate() {
                         let sx = cx + (dx as f32 - ww_f / 2.0) / scale;
+                        let (br, bg, bb) = checker(dx, dy);
                         *px = if nearest {
-                            sample_nearest(im, sx, sy)
+                            sample_nearest(im, sx, sy, br, bg, bb)
                         } else {
-                            sample(im, sx, sy)
+                            sample(im, sx, sy, br, bg, bb)
                         };
                     }
                 });

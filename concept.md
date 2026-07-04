@@ -359,7 +359,7 @@ To stay "fast and simple", the utility does **not**:
    There is a headless `--dump <in> <out.png>` mode for render checks.
 2. **Sound MVP:** type detection, player window, play/pause, progress, volume,
    browsing through sounds.
-3. **Polish:** transparency checkerboard (next). ✔ Done: neighbor prefetch,
+3. **Polish:** ✔ Done: transparency checkerboard, neighbor prefetch,
    parallel RGBA pack, natural sort. (GIF animation and drag-and-drop → non-goals.)
 4. **Optional:** reusing a single window on a repeated double-click
    (single-instance via a named pipe), extra formats, sound visualization.
