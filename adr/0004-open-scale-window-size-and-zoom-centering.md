@@ -1,6 +1,8 @@
 # 0004. Open scale, window size, and zoom centering
 
-Status: Accepted
+Status: Accepted; window-sizing (decision #2) superseded by
+[0005](0005-persist-window-position-and-size.md). Decisions #1 (open scale =
+shrink-to-fit) and #3 (zoom-to-cursor then clamp-and-center) remain in force.
 
 ## Context
 

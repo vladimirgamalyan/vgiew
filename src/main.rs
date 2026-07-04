@@ -310,18 +310,52 @@ fn clamp_center(cx: &mut f32, cy: &mut f32, scale: f32, iw: u32, ih: u32, ww: f3
     }
 }
 
-// Read just the pixel dimensions from the file header (cheap: no full decode).
-// Used to size the window before the background decode finishes.
-fn read_dimensions(path: &Path) -> Option<(u32, u32)> {
-    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+// ── Window geometry persistence (position + size across runs) ──
+// Stored in HKCU\Software\vgiew as "x,y,w,h": the outer position (screen pixels) and
+// the inner/client size (physical pixels). On the next run we restore it if it parses
+// and still fits the current monitor layout; otherwise Windows assigns the default.
+
+// Parse "x,y,w,h". Returns None on any malformed/corrupt input (missing field,
+// non-integer, extra field, or a non-positive size).
+#[cfg(windows)]
+fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
+    let mut it = s.split(',');
+    let x: i32 = it.next()?.trim().parse().ok()?;
+    let y: i32 = it.next()?.trim().parse().ok()?;
+    let w: u32 = it.next()?.trim().parse().ok()?;
+    let h: u32 = it.next()?.trim().parse().ok()?;
+    if it.next().is_some() || w == 0 || h == 0 {
+        return None;
+    }
+    Some((x, y, w, h))
 }
 
-const MIN_WIN_W: u32 = 480;
-const MIN_WIN_H: u32 = 360;
-
-// The desktop work area (screen minus taskbar) in physical pixels, primary monitor.
 #[cfg(windows)]
-fn work_area() -> (u32, u32) {
+fn load_window_geometry() -> Option<(i32, i32, u32, u32)> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\vgiew")
+        .ok()?;
+    let s: String = key.get_value("WindowGeometry").ok()?;
+    parse_geometry(&s)
+}
+
+#[cfg(windows)]
+fn save_window_geometry(x: i32, y: i32, w: u32, h: u32) {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey("Software\\vgiew") {
+        let _ = key.set_value("WindowGeometry", &format!("{x},{y},{w},{h}"));
+    }
+}
+
+// The work area (screen minus taskbar) of the monitor a window rect lands on, as
+// (left, top, right, bottom). None if the rect is off every monitor — e.g. a monitor
+// was removed (MonitorFromRect + MONITOR_DEFAULTTONULL). Used both as the pre-build
+// gate ("does the saved window still land somewhere?") and by fit_window_to_screen.
+#[cfg(windows)]
+fn monitor_work_area(x: i32, y: i32, w: u32, h: u32) -> Option<(i32, i32, i32, i32)> {
     #[repr(C)]
     struct Rect {
         left: i32,
@@ -329,42 +363,87 @@ fn work_area() -> (u32, u32) {
         right: i32,
         bottom: i32,
     }
+    #[repr(C)]
+    struct MonitorInfo {
+        cb_size: u32,
+        rc_monitor: Rect,
+        rc_work: Rect,
+        dw_flags: u32,
+    }
     #[link(name = "user32")]
     extern "system" {
-        fn SystemParametersInfoW(
-            action: u32,
-            ui_param: u32,
-            pv_param: *mut core::ffi::c_void,
-            win_ini: u32,
-        ) -> i32;
+        fn MonitorFromRect(lprc: *const Rect, dw_flags: u32) -> *mut core::ffi::c_void;
+        fn GetMonitorInfoW(hmonitor: *mut core::ffi::c_void, lpmi: *mut MonitorInfo) -> i32;
     }
-    const SPI_GETWORKAREA: u32 = 0x0030;
-    let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-    let ok = unsafe {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut Rect as *mut core::ffi::c_void, 0)
+    const MONITOR_DEFAULTTONULL: u32 = 0;
+    let rect = Rect {
+        left: x,
+        top: y,
+        right: x.saturating_add(w as i32),
+        bottom: y.saturating_add(h as i32),
     };
-    if ok == 0 {
-        return (1280, 800);
+    let mon = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) };
+    if mon.is_null() {
+        return None;
     }
-    (((r.right - r.left).max(1)) as u32, ((r.bottom - r.top).max(1)) as u32)
-}
-#[cfg(not(windows))]
-fn work_area() -> (u32, u32) {
-    (1920, 1080)
+    let mut mi = MonitorInfo {
+        cb_size: core::mem::size_of::<MonitorInfo>() as u32,
+        rc_monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+        rc_work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+        dw_flags: 0,
+    };
+    if unsafe { GetMonitorInfoW(mon, &mut mi) } == 0 {
+        return None;
+    }
+    Some((mi.rc_work.left, mi.rc_work.top, mi.rc_work.right, mi.rc_work.bottom))
 }
 
-// Initial window client size for an image: the shrink-to-fit image size, capped at
-// ~90% of the work area, floored at a minimum so tiny images don't get a pinhole window.
-fn initial_window_size(iw: u32, ih: u32) -> (u32, u32) {
-    let (wa_w, wa_h) = work_area();
-    let (max_w, max_h) = (wa_w * 9 / 10, wa_h * 9 / 10);
-    let s = (max_w as f32 / iw as f32)
-        .min(max_h as f32 / ih as f32)
-        .min(1.0);
-    let w = ((iw as f32 * s).round() as u32).max(MIN_WIN_W);
-    let h = ((ih as f32 * s).round() as u32).max(MIN_WIN_H);
-    (w, h)
+// After the window exists (so its real frame size is known), shrink and nudge it so the
+// whole outer window — title bar and borders included — fits the monitor work area. This
+// fits a restored window that is now too big or hangs off the edge (a lower-resolution
+// monitor) fully on screen. A no-op when it already fits.
+#[cfg(windows)]
+fn fit_window_to_screen(window: &winit::window::Window) {
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+    let outer = window.outer_size();
+    let inner = window.inner_size();
+    let Some((wl, wt, wr, wb)) = monitor_work_area(pos.x, pos.y, outer.width, outer.height) else {
+        return;
+    };
+    let work_w = (wr - wl).max(1) as u32;
+    let work_h = (wb - wt).max(1) as u32;
+    let frame_w = outer.width.saturating_sub(inner.width);
+    let frame_h = outer.height.saturating_sub(inner.height);
+    // Cap the outer window at the work area, then set the client size back from it.
+    let out_w = outer.width.min(work_w);
+    let out_h = outer.height.min(work_h);
+    if out_w != outer.width || out_h != outer.height {
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
+            out_w.saturating_sub(frame_w).max(1),
+            out_h.saturating_sub(frame_h).max(1),
+        ));
+    }
+    let nx = pos.x.clamp(wl, wr - out_w as i32);
+    let ny = pos.y.clamp(wt, wb - out_h as i32);
+    if nx != pos.x || ny != pos.y {
+        window.set_outer_position(winit::dpi::PhysicalPosition::new(nx, ny));
+    }
 }
+
+#[cfg(not(windows))]
+fn load_window_geometry() -> Option<(i32, i32, u32, u32)> {
+    None
+}
+#[cfg(not(windows))]
+fn save_window_geometry(_x: i32, _y: i32, _w: u32, _h: u32) {}
+#[cfg(not(windows))]
+fn monitor_work_area(_x: i32, _y: i32, _w: u32, _h: u32) -> Option<(i32, i32, i32, i32)> {
+    None
+}
+#[cfg(not(windows))]
+fn fit_window_to_screen(_window: &winit::window::Window) {}
 
 // ── Console for CLI subcommands (a windows-subsystem build has no console of its own) ──
 #[cfg(windows)]
@@ -546,6 +625,8 @@ fn unregister() -> std::io::Result<()> {
             let _ = owp.delete_value("vgiew.image");
         }
     }
+    // Remove our own settings key (persisted window geometry) so uninstall leaves nothing behind.
+    let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all("Software\\vgiew");
     notify_assoc_changed();
     Ok(())
 }
@@ -623,28 +704,29 @@ fn main() {
         .unwrap();
     let proxy = event_loop.create_proxy();
 
-    // Size the window to the (shrink-to-fit) image, capped at the work area. Reading
-    // just the header dimensions is cheap and keeps the "instant window, background
-    // decode" design: the full decode still runs off-thread. Fall back to a default
-    // size when there is no file or its header can't be read.
-    let inner_size: winit::dpi::Size = match arg.as_deref().and_then(|a| read_dimensions(Path::new(a))) {
-        Some((iw, ih)) => {
-            let (w, h) = initial_window_size(iw, ih);
-            winit::dpi::PhysicalSize::new(w, h).into()
-        }
-        None => winit::dpi::LogicalSize::new(1280.0, 800.0).into(),
-    };
+    // Restore the saved window position and size if it is present, valid, and still
+    // lands on a monitor that exists; otherwise leave placement to Windows (first run,
+    // corrupt data, or a monitor that was removed). The image is fit into whatever window
+    // we end up with, so no header pre-read is needed to size it.
+    let saved_geometry =
+        load_window_geometry().filter(|&(x, y, w, h)| monitor_work_area(x, y, w, h).is_some());
 
-    let window = Rc::new(
-        WindowBuilder::new()
-            .with_title("vgiew")
-            .with_inner_size(inner_size)
-            // Create hidden; the startup block below reveals it via DWM cloak once the
-            // first frame is painted, avoiding both the resize and white flash on show.
-            .with_visible(false)
-            .build(&event_loop)
-            .unwrap(),
-    );
+    let mut builder = WindowBuilder::new()
+        .with_title("vgiew")
+        // Create hidden; the startup block below reveals it via DWM cloak once the
+        // first frame is painted, avoiding both the resize and white flash on show.
+        .with_visible(false);
+    if let Some((x, y, w, h)) = saved_geometry {
+        builder = builder
+            .with_position(winit::dpi::PhysicalPosition::new(x, y))
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+    }
+    let window = Rc::new(builder.build(&event_loop).unwrap());
+    // Now that the window and its real frame exist, fit a restored window fully on
+    // screen — shrinking/nudging it if the monitor is smaller than when it was saved.
+    if saved_geometry.is_some() {
+        fit_window_to_screen(&window);
+    }
     let context = softbuffer::Context::new(window.clone()).unwrap();
     let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
@@ -669,6 +751,15 @@ fn main() {
     // Input.
     let mut mouse = (0.0f32, 0.0f32);
     let mut dragging = false;
+
+    // Last known windowed (non-fullscreen) geometry; persisted to the registry on exit.
+    let mut win_geom: (i32, i32, u32, u32) = {
+        let pos = window
+            .outer_position()
+            .unwrap_or(winit::dpi::PhysicalPosition::new(0, 0));
+        let size = window.inner_size();
+        (pos.x, pos.y, size.width, size.height)
+    };
 
     if !files.is_empty() {
         ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
@@ -759,8 +850,18 @@ fn main() {
             },
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Moved(pos) => {
+                    if !fullscreen {
+                        win_geom.0 = pos.x;
+                        win_geom.1 = pos.y;
+                    }
+                }
                 WindowEvent::Resized(_) => {
                     let size = window.inner_size();
+                    if !fullscreen {
+                        win_geom.2 = size.width;
+                        win_geom.3 = size.height;
+                    }
                     if fit_mode {
                         apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
                     } else if let Some(im) = cache.get(&current) {
@@ -894,6 +995,9 @@ fn main() {
                 }
                 _ => {}
             },
+            Event::LoopExiting => {
+                save_window_geometry(win_geom.0, win_geom.1, win_geom.2, win_geom.3);
+            }
             _ => {}
         })
         .unwrap();
