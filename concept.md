@@ -59,7 +59,7 @@ The type is determined by extension (and by file signature when needed).
 
 | Category | Formats |
 |----------|---------|
-| Images   | JPG, PNG, GIF (incl. animated), BMP, WEBP |
+| Images   | JPG, PNG, GIF (first frame), BMP, WEBP |
 | Sound    | WAV, MP3, FLAC, OGG |
 
 Future (not in MVP): AVIF/HEIC/JXL for images; M4A/AAC, Opus for sound.
@@ -69,7 +69,7 @@ Future (not in MVP): AVIF/HEIC/JXL for images; M4A/AAC, Opus for sound.
 ## 4. Installation and double-click binding
 
 - The utility takes a file path as a command-line argument.
-- With no argument, an empty window opens (drag-and-drop — TODO).
+- With no argument, an empty window opens.
 
 ### Intermediate releases (implemented)
 
@@ -104,7 +104,7 @@ Behavior:
 - **Filtering by scale:** when zooming in (scale ≥ 1) — nearest-neighbor
   (crisp pixel edges, no blur, like other viewers); when zooming out (scale < 1) —
   bilinear (smoothing, no aliasing).
-- **Transparency** is drawn as a checkerboard; **GIF** animates.
+- **Transparency** is drawn as a checkerboard. **GIF** shows its first frame only.
 - Window background — neutral dark.
 - Window title: file name, pixel size, current scale.
 
@@ -342,6 +342,7 @@ To stay "fast and simple", the utility does **not**:
 - A gallery/thumbnail grid, cataloguing, tags.
 - Playlists, an equalizer, network streaming.
 - A settings "kitchen sink", themes, plugins.
+- GIF animation and drag-and-drop into the window (deferred as out of scope).
 
 ---
 
@@ -351,13 +352,15 @@ To stay "fast and simple", the utility does **not**:
    open by argument, background decode (window shows immediately), format detection
    by content, fit + letterbox, multithreaded resampling (rayon), natural sort,
    title with name/size/scale.
+   browsing `←/→`/`Space` with neighbor prefetch (instant on big photos),
+   parallel RGBA pack.
    Implemented but not yet verified live: zoom-to-cursor, pan, fullscreen
-   (`F`/`Enter`/`Esc`), browsing `←/→`/`Space`, `0`/`1` (fit/100%).
+   (`F`/`Enter`/`Esc`), `0`/`1` (fit/100%).
    There is a headless `--dump <in> <out.png>` mode for render checks.
 2. **Sound MVP:** type detection, player window, play/pause, progress, volume,
    browsing through sounds.
-3. **Polish:** GIF animation, transparency checkerboard, neighbor prefetch,
-   natural sort, drag-and-drop.
+3. **Polish:** transparency checkerboard (next). ✔ Done: neighbor prefetch,
+   parallel RGBA pack, natural sort. (GIF animation and drag-and-drop → non-goals.)
 4. **Optional:** reusing a single window on a repeated double-click
    (single-instance via a named pipe), extra formats, sound visualization.
    ✔ `--register`/`--unregister` + `install.ps1`/`uninstall.ps1` — already done

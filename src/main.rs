@@ -1,9 +1,11 @@
 // vgiew — a fast image viewer (MVP, Tier C path: winit + softbuffer + CPU).
 // Core architecture: the window shows immediately, decoding runs in the background,
 // resampling is multithreaded (rayon). Browse ←/→ through images in the folder.
+// Neighboring images are prefetched so browsing is instant.
 #![windows_subsystem = "windows"]
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -115,11 +117,12 @@ fn load_rgba(path: &Path) -> Option<image::RgbaImage> {
 
 fn pack_rgba(rgba: &image::RgbaImage) -> DecodedImage {
     let (w, h) = rgba.dimensions();
-    let mut px = vec![0u32; (w as usize) * (h as usize)];
-    for (i, p) in rgba.pixels().enumerate() {
-        let [r, g, b, a] = p.0;
-        px[i] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-    }
+    // Parallel RGBA8 -> 0xAARRGGBB; the collect is order-preserving.
+    let px: Vec<u32> = rgba
+        .as_raw()
+        .par_chunks_exact(4)
+        .map(|c| ((c[3] as u32) << 24) | ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
+        .collect();
     DecodedImage { w, h, px }
 }
 
@@ -135,6 +138,54 @@ fn spawn_decode(path: PathBuf, idx: usize, proxy: EventLoopProxy<UserEvent>) {
             let _ = proxy.send_event(UserEvent::Failed { idx });
         }
     });
+}
+
+// The neighbors (prev, next) of an index, wrapping around the folder.
+fn neighbors(current: usize, len: usize) -> (usize, usize) {
+    if len <= 1 {
+        return (current, current);
+    }
+    ((current + len - 1) % len, (current + 1) % len)
+}
+
+// Start a background decode for `idx` unless it's already cached, in flight, or failed.
+fn ensure_decode(
+    idx: usize,
+    files: &[PathBuf],
+    cache: &HashMap<usize, DecodedImage>,
+    inflight: &mut HashSet<usize>,
+    failed: &HashSet<usize>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    if idx >= files.len()
+        || cache.contains_key(&idx)
+        || inflight.contains(&idx)
+        || failed.contains(&idx)
+    {
+        return;
+    }
+    inflight.insert(idx);
+    spawn_decode(files[idx].clone(), idx, proxy.clone());
+}
+
+// Prefetch the neighbors of the current image so browsing is instant.
+fn prefetch(
+    current: usize,
+    files: &[PathBuf],
+    cache: &HashMap<usize, DecodedImage>,
+    inflight: &mut HashSet<usize>,
+    failed: &HashSet<usize>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    let (prev, next) = neighbors(current, files.len());
+    ensure_decode(next, files, cache, inflight, failed, proxy);
+    ensure_decode(prev, files, cache, inflight, failed, proxy);
+}
+
+// Keep only {prev, current, next} in the cache to bound memory (big images are ~w*h*4 bytes).
+fn evict(cache: &mut HashMap<usize, DecodedImage>, current: usize, len: usize) {
+    let (prev, next) = neighbors(current, len);
+    cache.retain(|&k, _| k == current || k == prev || k == next);
 }
 
 // Composites a pixel (0xAARRGGBB as r,g,b channels and alpha 0..1) over the background → 0x00RRGGBB.
@@ -340,9 +391,13 @@ fn dump(args: &[String]) {
     let out = &args[3];
     let ww: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1280);
     let wh: u32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(800);
+    let t_dec = std::time::Instant::now();
     let rgba = load_rgba(Path::new(src)).expect("decode");
+    let dec_ms = t_dec.elapsed().as_secs_f64() * 1000.0;
     let (w, h) = rgba.dimensions();
+    let t_pack = std::time::Instant::now();
     let img = pack_rgba(&rgba);
+    let pack_ms = t_pack.elapsed().as_secs_f64() * 1000.0;
     let scale = fit_scale(w, h, ww, wh);
     let mut buf = vec![0u32; (ww as usize) * (wh as usize)];
     draw(Some(&img), &mut buf, ww, wh, scale, w as f32 / 2.0, h as f32 / 2.0);
@@ -357,7 +412,7 @@ fn dump(args: &[String]) {
         );
     }
     out_img.save(out).expect("save");
-    println!("dumped {ww}x{wh} (fit scale {scale:.4}) -> {out}");
+    println!("{w}x{h}: decode {dec_ms:.1} ms + pack {pack_ms:.1} ms  (-> {ww}x{wh}, fit {scale:.4})");
 }
 
 fn main() {
@@ -418,12 +473,13 @@ fn main() {
         Some(a) => build_siblings(Path::new(a)),
         None => (Vec::new(), 0),
     };
-    if !files.is_empty() {
-        spawn_decode(files[current].clone(), current, proxy.clone());
-    }
+
+    // Decoded-image cache with neighbor prefetch; bounded to {prev, current, next}.
+    let mut cache: HashMap<usize, DecodedImage> = HashMap::new();
+    let mut inflight: HashSet<usize> = HashSet::new();
+    let mut failed: HashSet<usize> = HashSet::new();
 
     // View state.
-    let mut img: Option<DecodedImage> = None;
     let mut scale = 1.0f32;
     let mut cx = 0.0f32;
     let mut cy = 0.0f32;
@@ -434,8 +490,12 @@ fn main() {
     let mut mouse = (0.0f32, 0.0f32);
     let mut dragging = false;
 
+    if !files.is_empty() {
+        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+    }
+
     let update_title = |window: &winit::window::Window,
-                        img: &Option<DecodedImage>,
+                        img: Option<&DecodedImage>,
                         scale: f32,
                         files: &[PathBuf],
                         current: usize| {
@@ -454,9 +514,9 @@ fn main() {
             None => window.set_title(&format!("vgiew — {name}  (loading…)")),
         }
     };
-    update_title(&window, &img, scale, &files, current);
+    update_title(&window, None, scale, &files, current);
 
-    let apply_fit = |img: &Option<DecodedImage>,
+    let apply_fit = |img: Option<&DecodedImage>,
                      ww: u32,
                      wh: u32,
                      scale: &mut f32,
@@ -475,18 +535,24 @@ fn main() {
         .run(move |event, elwt| match event {
             Event::UserEvent(ue) => match ue {
                 UserEvent::Decoded { idx, img: new } => {
+                    inflight.remove(&idx);
+                    cache.insert(idx, new);
                     if idx == current {
-                        img = Some(new);
                         let size = window.inner_size();
                         fit_mode = true;
-                        apply_fit(&img, size.width, size.height, &mut scale, &mut cx, &mut cy);
-                        update_title(&window, &img, scale, &files, current);
+                        apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                        update_title(&window, cache.get(&current), scale, &files, current);
                         window.request_redraw();
+                        // Current is on screen — now prefetch its neighbors.
+                        prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
                     }
+                    evict(&mut cache, current, files.len());
                 }
                 UserEvent::Failed { idx } => {
+                    inflight.remove(&idx);
+                    failed.insert(idx);
                     if idx == current {
-                        update_title(&window, &None, scale, &files, current);
+                        update_title(&window, None, scale, &files, current);
                     }
                 }
             },
@@ -495,7 +561,7 @@ fn main() {
                 WindowEvent::Resized(_) => {
                     if fit_mode {
                         let size = window.inner_size();
-                        apply_fit(&img, size.width, size.height, &mut scale, &mut cx, &mut cy);
+                        apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
                     }
                     window.request_redraw();
                 }
@@ -519,7 +585,7 @@ fn main() {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                     };
-                    if dy != 0.0 && img.is_some() {
+                    if dy != 0.0 && cache.contains_key(&current) {
                         let size = window.inner_size();
                         let (ww, wh) = (size.width as f32, size.height as f32);
                         // Source point under the cursor before zoom.
@@ -531,7 +597,7 @@ fn main() {
                         cx = sx - (mouse.0 - ww / 2.0) / scale;
                         cy = sy - (mouse.1 - wh / 2.0) / scale;
                         fit_mode = false;
-                        update_title(&window, &img, scale, &files, current);
+                        update_title(&window, cache.get(&current), scale, &files, current);
                         window.request_redraw();
                     }
                 }
@@ -540,19 +606,31 @@ fn main() {
                         return;
                     }
                     let size = window.inner_size();
-                    match key.logical_key.as_ref() {
-                        Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Space) => {
+                    let lk = key.logical_key.as_ref();
+                    match lk {
+                        Key::Named(NamedKey::ArrowRight)
+                        | Key::Named(NamedKey::Space)
+                        | Key::Named(NamedKey::ArrowLeft) => {
                             if !files.is_empty() {
-                                current = (current + 1) % files.len();
-                                spawn_decode(files[current].clone(), current, proxy.clone());
-                                update_title(&window, &None, scale, &files, current);
-                            }
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            if !files.is_empty() {
-                                current = (current + files.len() - 1) % files.len();
-                                spawn_decode(files[current].clone(), current, proxy.clone());
-                                update_title(&window, &None, scale, &files, current);
+                                let forward = !matches!(lk, Key::Named(NamedKey::ArrowLeft));
+                                current = if forward {
+                                    (current + 1) % files.len()
+                                } else {
+                                    (current + files.len() - 1) % files.len()
+                                };
+                                if cache.contains_key(&current) {
+                                    // Prefetched — show instantly.
+                                    fit_mode = true;
+                                    apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                                    update_title(&window, cache.get(&current), scale, &files, current);
+                                    window.request_redraw();
+                                } else {
+                                    // Miss — kick off decode; keep the previous frame on screen until it arrives.
+                                    ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+                                    update_title(&window, None, scale, &files, current);
+                                }
+                                prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
+                                evict(&mut cache, current, files.len());
                             }
                         }
                         Key::Named(NamedKey::Escape) => {
@@ -573,17 +651,17 @@ fn main() {
                         }
                         Key::Character("0") => {
                             fit_mode = true;
-                            apply_fit(&img, size.width, size.height, &mut scale, &mut cx, &mut cy);
-                            update_title(&window, &img, scale, &files, current);
+                            apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                            update_title(&window, cache.get(&current), scale, &files, current);
                             window.request_redraw();
                         }
                         Key::Character("1") => {
-                            if let Some(im) = &img {
+                            if let Some(im) = cache.get(&current) {
                                 scale = 1.0;
                                 cx = im.w as f32 / 2.0;
                                 cy = im.h as f32 / 2.0;
                                 fit_mode = false;
-                                update_title(&window, &img, scale, &files, current);
+                                update_title(&window, cache.get(&current), scale, &files, current);
                                 window.request_redraw();
                             }
                         }
@@ -598,7 +676,7 @@ fn main() {
                         .unwrap();
                     let mut buffer = surface.buffer_mut().unwrap();
                     let slice: &mut [u32] = &mut buffer;
-                    draw(img.as_ref(), slice, w, h, scale, cx, cy);
+                    draw(cache.get(&current), slice, w, h, scale, cx, cy);
                     buffer.present().unwrap();
                 }
                 _ => {}
