@@ -1,0 +1,18 @@
+# Rust build output
+/target
+/spikes/target
+
+# Editor / IDE
+/.vscode/
+/.idea/
+*.iml
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# AI assistant instructions (local only)
+/CLAUDE.md
+/AGENTS.md
+/CODE_GUIDELINES.md

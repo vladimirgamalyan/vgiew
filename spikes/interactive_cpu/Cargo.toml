@@ -1,0 +1,8 @@
+[package]
+name = "interactive_cpu"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.29"
+softbuffer = "0.4"

@@ -1,0 +1,20 @@
+[package]
+name = "vgiew"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A fast, minimal image viewer for Windows, built for instant startup."
+
+[dependencies]
+winit = "0.29"
+softbuffer = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
+rayon = "1"
+winreg = "0.52"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

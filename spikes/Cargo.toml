@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["tier_a_eframe", "tier_b_pixels", "tier_c_softbuffer", "interactive_cpu", "gpu_tuned"]
+
+# Profile close to the utility's target release — we measure what will ship.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

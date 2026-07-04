@@ -1,0 +1,9 @@
+[package]
+name = "gpu_tuned"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.29"
+wgpu = "22"
+pollster = "0.3"

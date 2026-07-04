@@ -1,0 +1,9 @@
+[package]
+name = "tier_b_pixels"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+# pixels 0.14 depends on raw-window-handle 0.5 — enable the compatible winit feature.
+winit = { version = "0.29", features = ["rwh_05"] }
+pixels = "0.14"
