@@ -314,6 +314,77 @@ fn notify_assoc_changed() {
     }
 }
 
+// Cloak/uncloak the window at the DWM level. A cloaked window is composited (its surface
+// exists, so a GDI present lands in it) but not displayed. This lets us reveal the window
+// only after its first frame is painted, with no white flash on show.
+#[cfg(windows)]
+fn set_cloak(window: &winit::window::Window, cloak: bool) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut core::ffi::c_void,
+            attr: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const DWMWA_CLOAK: u32 = 13;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let value: i32 = cloak as i32;
+    unsafe {
+        DwmSetWindowAttribute(
+            h.hwnd.get() as *mut core::ffi::c_void,
+            DWMWA_CLOAK,
+            &value as *const i32 as *const core::ffi::c_void,
+            core::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+#[cfg(not(windows))]
+fn set_cloak(_window: &winit::window::Window, _cloak: bool) {}
+
+// Set the window class background brush to `rgb` (0xRRGGBB). If anything ever erases the
+// window before our first paint (e.g. a stray WM_ERASEBKGND), it fills dark instead of
+// white — a backstop to the DWM cloak in set_cloak. The brush lives for the process; the
+// OS reclaims it on exit.
+#[cfg(windows)]
+fn set_class_background(window: &winit::window::Window, rgb: u32) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> *mut core::ffi::c_void;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetClassLongPtrW(hwnd: *mut core::ffi::c_void, index: i32, value: isize) -> isize;
+    }
+    const GCLP_HBRBACKGROUND: i32 = -10;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    // COLORREF is 0x00BBGGRR; swap R and B from our 0xRRGGBB.
+    let color = ((rgb & 0xFF) << 16) | (rgb & 0x00FF00) | ((rgb >> 16) & 0xFF);
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        SetClassLongPtrW(
+            h.hwnd.get() as *mut core::ffi::c_void,
+            GCLP_HBRBACKGROUND,
+            brush as isize,
+        );
+    }
+}
+#[cfg(not(windows))]
+fn set_class_background(_window: &winit::window::Window, _rgb: u32) {}
+
 fn print_help() {
     println!(
         "vgiew — a fast image viewer\n\n\
@@ -473,9 +544,8 @@ fn main() {
         WindowBuilder::new()
             .with_title("vgiew")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
-            // Create hidden: winit shows the window at Windows' default size first and
-            // only then applies the requested inner size, which flashes as a brief
-            // resize. We reveal it below, already sized and painted.
+            // Create hidden; the startup block below reveals it via DWM cloak once the
+            // first frame is painted, avoiding both the resize and white flash on show.
             .with_visible(false)
             .build(&event_loop)
             .unwrap(),
@@ -544,8 +614,15 @@ fn main() {
         }
     };
 
-    // Paint the first frame (dark background) into the already-sized surface, then reveal
-    // the window — so it appears at its final size with content, with no startup flash.
+    // Startup without a white flash. A GDI present into a hidden window is discarded, so
+    // painting before show does not populate what DWM displays on reveal. Instead we cloak
+    // the window at the DWM level and then show it: it is composited (its surface exists)
+    // but not displayed. We paint the first frame into that surface, then uncloak — the
+    // window appears already sized and painted. As a backstop, a dark class background
+    // brush keeps any stray erase from flashing white even if cloaking is unavailable.
+    set_class_background(&window, BG);
+    set_cloak(&window, true);
+    window.set_visible(true);
     {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
@@ -557,7 +634,7 @@ fn main() {
         draw(cache.get(&current), slice, w, h, scale, cx, cy);
         buffer.present().unwrap();
     }
-    window.set_visible(true);
+    set_cloak(&window, false);
     window.request_redraw();
 
     event_loop
