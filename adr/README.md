@@ -54,3 +54,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   size, and zoom centering (window sizing superseded by 0005)
 - [0005](0005-persist-window-position-and-size.md) — Persist and restore window
   position and size
+- [0006](0006-single-instance-reuse-window.md) — Single instance: reuse the open
+  window for a new file

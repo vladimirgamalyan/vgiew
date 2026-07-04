@@ -27,8 +27,10 @@ struct DecodedImage {
 }
 
 enum UserEvent {
-    Decoded { idx: usize, img: DecodedImage },
-    Failed { idx: usize },
+    Decoded { path: PathBuf, idx: usize, img: DecodedImage },
+    Failed { path: PathBuf, idx: usize },
+    // Another instance was launched with a file and handed it to us (single-instance).
+    Open(PathBuf),
 }
 
 fn is_image(path: &Path) -> bool {
@@ -127,12 +129,13 @@ fn spawn_decode(path: PathBuf, idx: usize, proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || match load_rgba(&path) {
         Some(rgba) => {
             let _ = proxy.send_event(UserEvent::Decoded {
+                path,
                 idx,
                 img: pack_rgba(&rgba),
             });
         }
         None => {
-            let _ = proxy.send_event(UserEvent::Failed { idx });
+            let _ = proxy.send_event(UserEvent::Failed { path, idx });
         }
     });
 }
@@ -547,6 +550,178 @@ fn set_class_background(window: &winit::window::Window, rgb: u32) {
 #[cfg(not(windows))]
 fn set_class_background(_window: &winit::window::Window, _rgb: u32) {}
 
+// ── Single-instance IPC (a second launch hands its file to the running window) ──
+// A viewer that is already open should adopt a freshly opened image instead of spawning
+// a second window. The first instance runs a named-pipe server; a second instance
+// connects, writes the file path, and exits. The server forwards the path to the event
+// loop as UserEvent::Open. The pipe name is per-session so separate desktop sessions of
+// the same machine stay independent.
+
+// The desktop session this process runs in — used to scope the pipe name.
+#[cfg(windows)]
+fn session_id() -> u32 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+        fn ProcessIdToSessionId(dw_process_id: u32, p_session_id: *mut u32) -> i32;
+    }
+    let mut sid = 0u32;
+    unsafe {
+        if ProcessIdToSessionId(GetCurrentProcessId(), &mut sid) == 0 {
+            return 0;
+        }
+    }
+    sid
+}
+
+#[cfg(windows)]
+fn ipc_pipe_name() -> String {
+    format!(r"\\.\pipe\vgiew-{}", session_id())
+}
+
+// Absolute path from a possibly-relative CLI arg, without touching the filesystem or
+// adding a \\?\ verbatim prefix (which canonicalize would). Explorer already passes
+// absolute paths; this covers a relative path typed on the command line.
+#[cfg(windows)]
+fn absolutize(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
+// Grant any process permission to pull its window to the foreground. The launching
+// (secondary) process holds foreground rights; it calls this so the running instance's
+// SetForegroundWindow (via focus_window) is allowed to succeed.
+#[cfg(windows)]
+fn allow_foreground_any() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
+    }
+    const ASFW_ANY: u32 = 0xFFFF_FFFF;
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+// Try to hand `arg` to an already-running instance. Returns true if a running instance
+// accepted it (we should exit); false if none is running (we become the primary).
+#[cfg(windows)]
+fn forward_to_running_instance(arg: &Path) -> bool {
+    use std::io::Write;
+    let path = absolutize(arg);
+    // Open the server's pipe as a client. If it isn't there, no instance is running.
+    match std::fs::OpenOptions::new().write(true).open(ipc_pipe_name()) {
+        Ok(mut f) => {
+            // Let the running instance raise its window before we send the path.
+            allow_foreground_any();
+            // Send the OS-native path bytes; the server reconstructs them losslessly.
+            f.write_all(path.as_os_str().as_encoded_bytes()).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+// Primary instance: run the named-pipe server that receives paths from later launches.
+#[cfg(windows)]
+fn spawn_ipc_server(name: String, proxy: EventLoopProxy<UserEvent>) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt as _;
+    type Handle = *mut core::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateNamedPipeW(
+            lp_name: *const u16,
+            dw_open_mode: u32,
+            dw_pipe_mode: u32,
+            n_max_instances: u32,
+            n_out_buffer_size: u32,
+            n_in_buffer_size: u32,
+            n_default_time_out: u32,
+            lp_security_attributes: *const core::ffi::c_void,
+        ) -> Handle;
+        fn ConnectNamedPipe(h_named_pipe: Handle, lp_overlapped: *mut core::ffi::c_void) -> i32;
+        fn DisconnectNamedPipe(h_named_pipe: Handle) -> i32;
+        fn ReadFile(
+            h_file: Handle,
+            lp_buffer: *mut core::ffi::c_void,
+            n_number_of_bytes_to_read: u32,
+            lp_number_of_bytes_read: *mut u32,
+            lp_overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+        fn CloseHandle(h_object: Handle) -> i32;
+        fn GetLastError() -> u32;
+    }
+    const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
+    const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
+    const PIPE_WAIT: u32 = 0x0000_0000;
+    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+    const ERROR_PIPE_CONNECTED: u32 = 535;
+
+    let wide: Vec<u16> = OsStr::new(&name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    std::thread::spawn(move || loop {
+        let invalid: Handle = usize::MAX as Handle; // INVALID_HANDLE_VALUE (-1)
+        let h = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_INBOUND,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES,
+                0,
+                64 * 1024,
+                0,
+                core::ptr::null(),
+            )
+        };
+        if h == invalid {
+            break;
+        }
+        let connected = unsafe { ConnectNamedPipe(h, core::ptr::null_mut()) } != 0
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        if connected {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let mut read = 0u32;
+                let ok = unsafe {
+                    ReadFile(
+                        h,
+                        tmp.as_mut_ptr() as *mut core::ffi::c_void,
+                        tmp.len() as u32,
+                        &mut read,
+                        core::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..read as usize]);
+                if (read as usize) < tmp.len() {
+                    break;
+                }
+            }
+            if !buf.is_empty() {
+                // The bytes came from OsStr::as_encoded_bytes in the sibling instance,
+                // so reconstructing them with from_encoded_bytes_unchecked is sound.
+                let os = unsafe { OsStr::from_encoded_bytes_unchecked(&buf) };
+                let _ = proxy.send_event(UserEvent::Open(PathBuf::from(os)));
+            }
+        }
+        unsafe {
+            DisconnectNamedPipe(h);
+            CloseHandle(h);
+        }
+    });
+}
+
 fn print_help() {
     println!(
         "vgiew — a fast image viewer\n\n\
@@ -699,10 +874,24 @@ fn main() {
         _ => {}
     }
     let arg = args.get(1).cloned();
+
+    // Single instance: if we were given a file and a viewer is already running in this
+    // session, hand it the path and exit instead of opening a second window.
+    #[cfg(windows)]
+    if let Some(a) = &arg {
+        if forward_to_running_instance(Path::new(a)) {
+            return;
+        }
+    }
+
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .build()
         .unwrap();
     let proxy = event_loop.create_proxy();
+
+    // We are the primary instance: serve future launches that want to reuse this window.
+    #[cfg(windows)]
+    spawn_ipc_server(ipc_pipe_name(), proxy.clone());
 
     // Restore the saved window position and size if it is present, valid, and still
     // lands on a monitor that exists; otherwise leave placement to Windows (first run,
@@ -731,7 +920,7 @@ fn main() {
     let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
     // Image list and current index.
-    let (files, mut current): (Vec<PathBuf>, usize) = match &arg {
+    let (mut files, mut current): (Vec<PathBuf>, usize) = match &arg {
         Some(a) => build_siblings(Path::new(a)),
         None => (Vec::new(), 0),
     };
@@ -826,7 +1015,12 @@ fn main() {
     event_loop
         .run(move |event, elwt| match event {
             Event::UserEvent(ue) => match ue {
-                UserEvent::Decoded { idx, img: new } => {
+                UserEvent::Decoded { path, idx, img: new } => {
+                    // Drop results for a file list we have since replaced (Open swapped
+                    // folders): the same index now points at a different file.
+                    if files.get(idx) != Some(&path) {
+                        return;
+                    }
                     inflight.remove(&idx);
                     cache.insert(idx, new);
                     if idx == current {
@@ -840,12 +1034,36 @@ fn main() {
                     }
                     evict(&mut cache, current, files.len());
                 }
-                UserEvent::Failed { idx } => {
+                UserEvent::Failed { path, idx } => {
+                    if files.get(idx) != Some(&path) {
+                        return;
+                    }
                     inflight.remove(&idx);
                     failed.insert(idx);
                     if idx == current {
                         update_title(&window, None, scale, &files, current);
                     }
+                }
+                UserEvent::Open(path) => {
+                    // A second launch handed us a file: load it in this window instead of
+                    // opening a new one. Rebuild the folder list and drop all caches — the
+                    // old indices refer to the previous folder (stale in-flight decodes are
+                    // ignored by the path check above).
+                    let (new_files, new_current) = build_siblings(&path);
+                    files = new_files;
+                    current = new_current;
+                    cache.clear();
+                    inflight.clear();
+                    failed.clear();
+                    fit_mode = true;
+                    if !files.is_empty() {
+                        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+                    }
+                    update_title(&window, None, scale, &files, current);
+                    // Bring this window to the front for the user who just opened the file.
+                    window.set_minimized(false);
+                    window.focus_window();
+                    window.request_redraw();
                 }
             },
             Event::WindowEvent { event, .. } => match event {
