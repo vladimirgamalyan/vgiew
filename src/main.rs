@@ -473,6 +473,10 @@ fn main() {
         WindowBuilder::new()
             .with_title("vgiew")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
+            // Create hidden: winit shows the window at Windows' default size first and
+            // only then applies the requested inner size, which flashes as a brief
+            // resize. We reveal it below, already sized and painted.
+            .with_visible(false)
             .build(&event_loop)
             .unwrap(),
     );
@@ -540,6 +544,20 @@ fn main() {
         }
     };
 
+    // Paint the first frame (dark background) into the already-sized surface, then reveal
+    // the window — so it appears at its final size with content, with no startup flash.
+    {
+        let size = window.inner_size();
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        surface
+            .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
+            .unwrap();
+        let mut buffer = surface.buffer_mut().unwrap();
+        let slice: &mut [u32] = &mut buffer;
+        draw(cache.get(&current), slice, w, h, scale, cx, cy);
+        buffer.present().unwrap();
+    }
+    window.set_visible(true);
     window.request_redraw();
 
     event_loop
