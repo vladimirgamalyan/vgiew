@@ -283,6 +283,89 @@ fn fit_scale(iw: u32, ih: u32, ww: u32, wh: u32) -> f32 {
     (ww as f32 / iw as f32).min(wh as f32 / ih as f32)
 }
 
+// Shrink-to-fit: downscale images larger than the window, but never enlarge a
+// small image past 100%. This is the on-open / reset scale and the zoom-out floor.
+fn view_fit(iw: u32, ih: u32, ww: u32, wh: u32) -> f32 {
+    fit_scale(iw, ih, ww, wh).min(1.0)
+}
+
+// Keep the view within bounds after a zoom or pan. `cx`/`cy` is the image point at
+// the window center; the visible span on an axis is window/scale image pixels wide.
+// Per axis, independently: if the image is smaller than the window on that axis,
+// lock it to center; otherwise clamp so neither edge pulls inside the window (no
+// gap). Running this after every zoom/pan is what re-centers a smaller-than-window
+// image on zoom-out — there is no separate re-center path.
+fn clamp_center(cx: &mut f32, cy: &mut f32, scale: f32, iw: u32, ih: u32, ww: f32, wh: f32) {
+    if iw as f32 * scale <= ww {
+        *cx = iw as f32 / 2.0;
+    } else {
+        let half = (ww / 2.0) / scale;
+        *cx = cx.clamp(half, iw as f32 - half);
+    }
+    if ih as f32 * scale <= wh {
+        *cy = ih as f32 / 2.0;
+    } else {
+        let half = (wh / 2.0) / scale;
+        *cy = cy.clamp(half, ih as f32 - half);
+    }
+}
+
+// Read just the pixel dimensions from the file header (cheap: no full decode).
+// Used to size the window before the background decode finishes.
+fn read_dimensions(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+}
+
+const MIN_WIN_W: u32 = 480;
+const MIN_WIN_H: u32 = 360;
+
+// The desktop work area (screen minus taskbar) in physical pixels, primary monitor.
+#[cfg(windows)]
+fn work_area() -> (u32, u32) {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(
+            action: u32,
+            ui_param: u32,
+            pv_param: *mut core::ffi::c_void,
+            win_ini: u32,
+        ) -> i32;
+    }
+    const SPI_GETWORKAREA: u32 = 0x0030;
+    let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut Rect as *mut core::ffi::c_void, 0)
+    };
+    if ok == 0 {
+        return (1280, 800);
+    }
+    (((r.right - r.left).max(1)) as u32, ((r.bottom - r.top).max(1)) as u32)
+}
+#[cfg(not(windows))]
+fn work_area() -> (u32, u32) {
+    (1920, 1080)
+}
+
+// Initial window client size for an image: the shrink-to-fit image size, capped at
+// ~90% of the work area, floored at a minimum so tiny images don't get a pinhole window.
+fn initial_window_size(iw: u32, ih: u32) -> (u32, u32) {
+    let (wa_w, wa_h) = work_area();
+    let (max_w, max_h) = (wa_w * 9 / 10, wa_h * 9 / 10);
+    let s = (max_w as f32 / iw as f32)
+        .min(max_h as f32 / ih as f32)
+        .min(1.0);
+    let w = ((iw as f32 * s).round() as u32).max(MIN_WIN_W);
+    let h = ((ih as f32 * s).round() as u32).max(MIN_WIN_H);
+    (w, h)
+}
+
 // ── Console for CLI subcommands (a windows-subsystem build has no console of its own) ──
 #[cfg(windows)]
 fn attach_console() {
@@ -540,10 +623,22 @@ fn main() {
         .unwrap();
     let proxy = event_loop.create_proxy();
 
+    // Size the window to the (shrink-to-fit) image, capped at the work area. Reading
+    // just the header dimensions is cheap and keeps the "instant window, background
+    // decode" design: the full decode still runs off-thread. Fall back to a default
+    // size when there is no file or its header can't be read.
+    let inner_size: winit::dpi::Size = match arg.as_deref().and_then(|a| read_dimensions(Path::new(a))) {
+        Some((iw, ih)) => {
+            let (w, h) = initial_window_size(iw, ih);
+            winit::dpi::PhysicalSize::new(w, h).into()
+        }
+        None => winit::dpi::LogicalSize::new(1280.0, 800.0).into(),
+    };
+
     let window = Rc::new(
         WindowBuilder::new()
             .with_title("vgiew")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
+            .with_inner_size(inner_size)
             // Create hidden; the startup block below reveals it via DWM cloak once the
             // first frame is painted, avoiding both the resize and white flash on show.
             .with_visible(false)
@@ -608,7 +703,7 @@ fn main() {
                      cx: &mut f32,
                      cy: &mut f32| {
         if let Some(im) = img {
-            *scale = fit_scale(im.w, im.h, ww, wh);
+            *scale = view_fit(im.w, im.h, ww, wh);
             *cx = im.w as f32 / 2.0;
             *cy = im.h as f32 / 2.0;
         }
@@ -665,9 +760,11 @@ fn main() {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(_) => {
+                    let size = window.inner_size();
                     if fit_mode {
-                        let size = window.inner_size();
                         apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                    } else if let Some(im) = cache.get(&current) {
+                        clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
                     }
                     window.request_redraw();
                 }
@@ -676,6 +773,10 @@ fn main() {
                     if dragging {
                         cx -= (new.0 - mouse.0) / scale;
                         cy -= (new.1 - mouse.1) / scale;
+                        if let Some(im) = cache.get(&current) {
+                            let size = window.inner_size();
+                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                        }
                         fit_mode = false;
                         window.request_redraw();
                     }
@@ -691,20 +792,25 @@ fn main() {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                     };
-                    if dy != 0.0 && cache.contains_key(&current) {
-                        let size = window.inner_size();
-                        let (ww, wh) = (size.width as f32, size.height as f32);
-                        // Source point under the cursor before zoom.
-                        let sx = cx + (mouse.0 - ww / 2.0) / scale;
-                        let sy = cy + (mouse.1 - wh / 2.0) / scale;
-                        let factor = if dy > 0.0 { 1.25 } else { 0.8 };
-                        scale = (scale * factor).clamp(0.01, 64.0);
-                        // Keep the same source point under the cursor.
-                        cx = sx - (mouse.0 - ww / 2.0) / scale;
-                        cy = sy - (mouse.1 - wh / 2.0) / scale;
-                        fit_mode = false;
-                        update_title(&window, cache.get(&current), scale, &files, current);
-                        window.request_redraw();
+                    if dy != 0.0 {
+                        if let Some((iw, ih)) = cache.get(&current).map(|im| (im.w, im.h)) {
+                            let size = window.inner_size();
+                            let (ww, wh) = (size.width as f32, size.height as f32);
+                            // Source point under the cursor before zoom.
+                            let sx = cx + (mouse.0 - ww / 2.0) / scale;
+                            let sy = cy + (mouse.1 - wh / 2.0) / scale;
+                            let factor = if dy > 0.0 { 1.25 } else { 0.8 };
+                            // Floor zoom-out at fit so the image is never smaller than fit.
+                            let min_scale = view_fit(iw, ih, size.width, size.height);
+                            scale = (scale * factor).clamp(min_scale, 64.0);
+                            // Keep the same source point under the cursor, then bound/center.
+                            cx = sx - (mouse.0 - ww / 2.0) / scale;
+                            cy = sy - (mouse.1 - wh / 2.0) / scale;
+                            clamp_center(&mut cx, &mut cy, scale, iw, ih, ww, wh);
+                            fit_mode = false;
+                            update_title(&window, cache.get(&current), scale, &files, current);
+                            window.request_redraw();
+                        }
                     }
                 }
                 WindowEvent::KeyboardInput { event: key, .. } => {
@@ -762,10 +868,11 @@ fn main() {
                             window.request_redraw();
                         }
                         Key::Character("1") => {
-                            if let Some(im) = cache.get(&current) {
+                            if let Some((iw, ih)) = cache.get(&current).map(|im| (im.w, im.h)) {
                                 scale = 1.0;
-                                cx = im.w as f32 / 2.0;
-                                cy = im.h as f32 / 2.0;
+                                cx = iw as f32 / 2.0;
+                                cy = ih as f32 / 2.0;
+                                clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                                 fit_mode = false;
                                 update_title(&window, cache.get(&current), scale, &files, current);
                                 window.request_redraw();

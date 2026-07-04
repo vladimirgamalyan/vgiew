@@ -48,3 +48,7 @@ Before proposing or re-proposing a decision that feels debatable, check
   decisions as ADRs
 - [0002](0002-render-on-cpu-softbuffer.md) — Render on the CPU (softbuffer),
   not the GPU
+- [0003](0003-reveal-window-via-dwm-cloak.md) — Reveal the window via DWM cloak
+  to avoid a startup flash
+- [0004](0004-open-scale-window-size-and-zoom-centering.md) — Open scale, window
+  size, and zoom centering
