@@ -19,6 +19,8 @@ use winit::window::{Fullscreen, Icon, WindowBuilder};
 const BG: u32 = 0x001E_1E1E; // dark background (softbuffer: 0x00RRGGBB)
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
+#[cfg(windows)]
+const REUSE_RUNNING_WINDOW_ON_FILE_OPEN: bool = false;
 
 struct DecodedImage {
     w: u32,
@@ -29,7 +31,7 @@ struct DecodedImage {
 enum UserEvent {
     Decoded { path: PathBuf, idx: usize, img: DecodedImage },
     Failed { path: PathBuf, idx: usize },
-    // Another instance was launched with a file and handed it to us (single-instance).
+    // Optional reuse mode: another process handed this window a file to open.
     Open(PathBuf),
 }
 
@@ -558,12 +560,12 @@ fn set_class_background(window: &winit::window::Window, rgb: u32) {
 #[cfg(not(windows))]
 fn set_class_background(_window: &winit::window::Window, _rgb: u32) {}
 
-// ── Single-instance IPC (a second launch hands its file to the running window) ──
-// A viewer that is already open should adopt a freshly opened image instead of spawning
-// a second window. The first instance runs a named-pipe server; a second instance
-// connects, writes the file path, and exits. The server forwards the path to the event
-// loop as UserEvent::Open. The pipe name is per-session so separate desktop sessions of
-// the same machine stay independent.
+// ── Optional reuse-window IPC (currently disabled by default) ──
+// When enabled, a viewer that is already open adopts a freshly opened image instead
+// of spawning a second window. The first instance runs a named-pipe server; a second
+// instance connects, writes the file path, and exits. The server forwards the path
+// to the event loop as UserEvent::Open. The pipe name is per-session so separate
+// desktop sessions of the same machine stay independent.
 
 // The desktop session this process runs in — used to scope the pipe name.
 #[cfg(windows)]
@@ -883,12 +885,14 @@ fn main() {
     }
     let arg = args.get(1).cloned();
 
-    // Single instance: if we were given a file and a viewer is already running in this
-    // session, hand it the path and exit instead of opening a second window.
+    // Optional reuse mode: if re-enabled, a file launch can hand its path to a
+    // running viewer and exit instead of opening a second window.
     #[cfg(windows)]
-    if let Some(a) = &arg {
-        if forward_to_running_instance(Path::new(a)) {
-            return;
+    if REUSE_RUNNING_WINDOW_ON_FILE_OPEN {
+        if let Some(a) = &arg {
+            if forward_to_running_instance(Path::new(a)) {
+                return;
+            }
         }
     }
 
@@ -897,9 +901,11 @@ fn main() {
         .unwrap();
     let proxy = event_loop.create_proxy();
 
-    // We are the primary instance: serve future launches that want to reuse this window.
+    // Optional reuse mode: serve future launches that want to reuse this window.
     #[cfg(windows)]
-    spawn_ipc_server(ipc_pipe_name(), proxy.clone());
+    if REUSE_RUNNING_WINDOW_ON_FILE_OPEN {
+        spawn_ipc_server(ipc_pipe_name(), proxy.clone());
+    }
 
     // Restore the saved window position and size if it is present, valid, and still
     // lands on a monitor that exists; otherwise leave placement to Windows (first run,
@@ -1054,10 +1060,10 @@ fn main() {
                     }
                 }
                 UserEvent::Open(path) => {
-                    // A second launch handed us a file: load it in this window instead of
-                    // opening a new one. Rebuild the folder list and drop all caches — the
-                    // old indices refer to the previous folder (stale in-flight decodes are
-                    // ignored by the path check above).
+                    // Optional reuse mode handed this window a file. Rebuild the
+                    // folder list and drop all caches: old indices refer to the
+                    // previous folder, and stale in-flight decodes are ignored by
+                    // the path check above.
                     let (new_files, new_current) = build_siblings(&path);
                     files = new_files;
                     current = new_current;

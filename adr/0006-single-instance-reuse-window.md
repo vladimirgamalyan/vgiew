@@ -1,6 +1,6 @@
 # 0006. Single instance: reuse the open window for a new file
 
-Status: Accepted
+Status: Superseded by 0007
 
 ## Context
 

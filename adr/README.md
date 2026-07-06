@@ -55,4 +55,6 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0005](0005-persist-window-position-and-size.md) — Persist and restore window
   position and size
 - [0006](0006-single-instance-reuse-window.md) — Single instance: reuse the open
-  window for a new file
+  window for a new file (superseded by 0007)
+- [0007](0007-open-file-launches-in-new-windows.md) — Open file launches in new
+  windows by default
