@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Fullscreen, WindowBuilder};
+use winit::window::{Fullscreen, Icon, WindowBuilder};
 
 const BG: u32 = 0x001E_1E1E; // dark background (softbuffer: 0x00RRGGBB)
 
@@ -123,6 +123,14 @@ fn pack_rgba(rgba: &image::RgbaImage) -> DecodedImage {
         .map(|c| ((c[3] as u32) << 24) | ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
         .collect();
     DecodedImage { w, h, px }
+}
+
+fn load_app_icon() -> Option<Icon> {
+    let rgba = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .ok()?
+        .to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Icon::from_rgba(rgba.into_raw(), w, h).ok()
 }
 
 fn spawn_decode(path: PathBuf, idx: usize, proxy: EventLoopProxy<UserEvent>) {
@@ -902,6 +910,7 @@ fn main() {
 
     let mut builder = WindowBuilder::new()
         .with_title("vgiew")
+        .with_window_icon(load_app_icon())
         // Create hidden; the startup block below reveals it via DWM cloak once the
         // first frame is painted, avoiding both the resize and white flash on show.
         .with_visible(false);
