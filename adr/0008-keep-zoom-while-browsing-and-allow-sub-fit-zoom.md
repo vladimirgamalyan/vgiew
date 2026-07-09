@@ -44,12 +44,16 @@ We will adopt XnView MP's model:
    image is centered by the existing `clamp_center`. `0` still refits, `1` still sets
    100%, maximum zoom stays 64×.
 
-2. **Carry the literal zoom while browsing.** ←/→ keeps the existing `fit_mode` flag:
-   while at fit, each image is refit to its own fit scale (unchanged from 0004); once
-   the user has manually zoomed (wheel, or `1`), the literal `scale` is carried onto
-   each newly shown image — recentered on the image, then clamped — regardless of the
-   new image's size and with no clamp-to-fit. This holds whether the next image is
-   prefetched (shown instantly) or decoded on the fly (carried when it lands).
+2. **Carry the literal zoom and pan while browsing.** ←/→ keeps the existing
+   `fit_mode` flag: while at fit, each image is refit to its own fit scale (unchanged
+   from 0004); once the user has manually zoomed (wheel, or `1`), both the literal
+   `scale` and the pan (`cx`/`cy`) are carried onto each newly shown image — kept as-is,
+   then clamped to the new image's bounds (`clamp_center` centers any axis smaller than
+   the window) — regardless of the new image's size and with no clamp-to-fit. So the
+   same on-screen region stays put across a series of same-size images. This holds
+   whether the next image is prefetched (shown instantly) or decoded on the fly (carried
+   when it lands). XnView MP behaves the same way (verified: two 2000×2000 images show
+   the identical panned region across navigation).
 
 Shrink-to-fit remains the on-open / folder-open / `0`-key scale, and zoom-to-cursor
 then clamp-and-center is unchanged. This **supersedes 0004's zoom-out floor** (part of
@@ -66,7 +70,8 @@ the rest of 0004's #1 and #3 stand.
 - No snap-to-fit is needed because the floor is absolute, so the carry is clean in both
   directions. Verified end-to-end on the built app across all six test sizes (fit
   browsing refits; a manual 100% and a sub-fit 64% each carried onto larger and smaller
-  images, above and below their own fit).
+  images, above and below their own fit) and pan is preserved (a 100% view panned to a
+  corner shows the same corner on the next image).
 - Bilinear minification below fit can alias on high-detail images — already true at fit
   for large images; sub-fit only extends the range. A better minifier (mip / area
   average) is out of scope.

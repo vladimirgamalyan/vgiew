@@ -1049,8 +1049,7 @@ fn main() {
                         if fit_mode {
                             apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
                         } else if let Some(im) = cache.get(&current) {
-                            cx = im.w as f32 / 2.0;
-                            cy = im.h as f32 / 2.0;
+                            // Carry zoom and pan: keep cx/cy, clamp to the new image.
                             clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
                         }
                         update_title(&window, cache.get(&current), scale, &files, current);
@@ -1181,8 +1180,7 @@ fn main() {
                                     if fit_mode {
                                         apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
                                     } else if let Some(im) = cache.get(&current) {
-                                        cx = im.w as f32 / 2.0;
-                                        cy = im.h as f32 / 2.0;
+                                        // Carry zoom and pan: keep cx/cy, clamp to the new image.
                                         clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
                                     }
                                     update_title(&window, cache.get(&current), scale, &files, current);
