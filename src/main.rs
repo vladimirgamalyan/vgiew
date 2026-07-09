@@ -16,7 +16,7 @@ use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Icon, WindowBuilder};
 
-const BG: u32 = 0x001E_1E1E; // dark background (softbuffer: 0x00RRGGBB)
+const BG: u32 = 0x00F1_F1F1; // viewport background, matches XnView MP (softbuffer: 0x00RRGGBB)
 
 // Absolute zoom-out floor (1%). Zoom-out is no longer floored at fit, so a below-fit
 // zoom can be carried across images while browsing (XnView-style); `0` refits.
@@ -215,9 +215,9 @@ fn composite(r: f32, g: f32, b: f32, a: f32, br: f32, bg: f32, bb: f32) -> u32 {
 #[inline(always)]
 fn checker(dx: usize, dy: usize) -> (f32, f32, f32) {
     if (((dx >> 3) + (dy >> 3)) & 1) == 0 {
-        (0x2B as f32, 0x2B as f32, 0x2B as f32)
+        (255.0, 255.0, 255.0) // XnView MP checkerColor1
     } else {
-        (0x35 as f32, 0x35 as f32, 0x35 as f32)
+        (240.0, 240.0, 240.0) // XnView MP checkerColor2
     }
 }
 
@@ -529,8 +529,8 @@ fn set_cloak(window: &winit::window::Window, cloak: bool) {
 fn set_cloak(_window: &winit::window::Window, _cloak: bool) {}
 
 // Set the window class background brush to `rgb` (0xRRGGBB). If anything ever erases the
-// window before our first paint (e.g. a stray WM_ERASEBKGND), it fills dark instead of
-// white — a backstop to the DWM cloak in set_cloak. The brush lives for the process; the
+// window before our first paint (e.g. a stray WM_ERASEBKGND), it fills that color instead
+// of white — a backstop to the DWM cloak in set_cloak. The brush lives for the process; the
 // OS reclaims it on exit.
 #[cfg(windows)]
 fn set_class_background(window: &winit::window::Window, rgb: u32) {
