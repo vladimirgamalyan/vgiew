@@ -1155,7 +1155,6 @@ fn main() {
                     let lk = key.logical_key.as_ref();
                     match lk {
                         Key::Named(NamedKey::ArrowRight)
-                        | Key::Named(NamedKey::Space)
                         | Key::Named(NamedKey::ArrowLeft) => {
                             if !files.is_empty() {
                                 let forward = !matches!(lk, Key::Named(NamedKey::ArrowLeft));

@@ -38,7 +38,7 @@ The whole design and the measurements behind the key decisions live in
 
 | Key | Action |
 |-----|--------|
-| `←` / `→` / `Space` | previous / next image |
+| `←` / `→` | previous / next image |
 | Mouse wheel | zoom to cursor |
 | Left-drag | pan |
 | `F` / `Enter` | toggle fullscreen |
