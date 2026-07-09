@@ -1117,7 +1117,7 @@ fn main() {
                     mouse = new;
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
-                    if button == MouseButton::Left {
+                    if button == MouseButton::Left || button == MouseButton::Right {
                         dragging = state == ElementState::Pressed;
                     }
                 }
