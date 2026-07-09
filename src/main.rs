@@ -18,6 +18,10 @@ use winit::window::{Fullscreen, Icon, WindowBuilder};
 
 const BG: u32 = 0x001E_1E1E; // dark background (softbuffer: 0x00RRGGBB)
 
+// Absolute zoom-out floor (1%). Zoom-out is no longer floored at fit, so a below-fit
+// zoom can be carried across images while browsing (XnView-style); `0` refits.
+const MIN_SCALE: f32 = 0.01;
+
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
 #[cfg(windows)]
 const REUSE_RUNNING_WINDOW_ON_FILE_OPEN: bool = false;
@@ -1040,8 +1044,15 @@ fn main() {
                     cache.insert(idx, new);
                     if idx == current {
                         let size = window.inner_size();
-                        fit_mode = true;
-                        apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                        // Fit on first load / folder open (those paths set fit_mode); when a
+                        // browse-miss decode lands while zoomed, carry the literal scale.
+                        if fit_mode {
+                            apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                        } else if let Some(im) = cache.get(&current) {
+                            cx = im.w as f32 / 2.0;
+                            cy = im.h as f32 / 2.0;
+                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                        }
                         update_title(&window, cache.get(&current), scale, &files, current);
                         window.request_redraw();
                         // Current is on screen — now prefetch its neighbors.
@@ -1134,9 +1145,9 @@ fn main() {
                             let sx = cx + (mouse.0 - ww / 2.0) / scale;
                             let sy = cy + (mouse.1 - wh / 2.0) / scale;
                             let factor = if dy > 0.0 { 1.25 } else { 0.8 };
-                            // Floor zoom-out at fit so the image is never smaller than fit.
-                            let min_scale = view_fit(iw, ih, size.width, size.height);
-                            scale = (scale * factor).clamp(min_scale, 64.0);
+                            // Zoom-out floor is an absolute minimum (not fit), so a below-fit
+                            // zoom is reachable and can be carried while browsing; `0` refits.
+                            scale = (scale * factor).clamp(MIN_SCALE, 64.0);
                             // Keep the same source point under the cursor, then bound/center.
                             cx = sx - (mouse.0 - ww / 2.0) / scale;
                             cy = sy - (mouse.1 - wh / 2.0) / scale;
@@ -1164,9 +1175,16 @@ fn main() {
                                     (current + files.len() - 1) % files.len()
                                 };
                                 if cache.contains_key(&current) {
-                                    // Prefetched — show instantly.
-                                    fit_mode = true;
-                                    apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                                    // Prefetched — show instantly. Refit only if we were at
+                                    // fit; otherwise carry the current zoom onto the new image
+                                    // (recenter + clamp), keeping the literal scale.
+                                    if fit_mode {
+                                        apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                                    } else if let Some(im) = cache.get(&current) {
+                                        cx = im.w as f32 / 2.0;
+                                        cy = im.h as f32 / 2.0;
+                                        clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                                    }
                                     update_title(&window, cache.get(&current), scale, &files, current);
                                     window.request_redraw();
                                 } else {

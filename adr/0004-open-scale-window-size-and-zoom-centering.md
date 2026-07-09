@@ -1,8 +1,10 @@
 # 0004. Open scale, window size, and zoom centering
 
 Status: Accepted; window-sizing (decision #2) superseded by
-[0005](0005-persist-window-position-and-size.md). Decisions #1 (open scale =
-shrink-to-fit) and #3 (zoom-to-cursor then clamp-and-center) remain in force.
+[0005](0005-persist-window-position-and-size.md); the zoom-out floor (part of #3) and
+the "browsing fits each image" behavior (part of #1) superseded by
+[0008](0008-keep-zoom-while-browsing-and-allow-sub-fit-zoom.md). The rest of #1 (open
+scale = shrink-to-fit) and #3 (zoom-to-cursor then clamp-and-center) remain in force.
 
 ## Context
 

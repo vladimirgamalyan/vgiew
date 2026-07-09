@@ -51,10 +51,13 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0003](0003-reveal-window-via-dwm-cloak.md) — Reveal the window via DWM cloak
   to avoid a startup flash
 - [0004](0004-open-scale-window-size-and-zoom-centering.md) — Open scale, window
-  size, and zoom centering (window sizing superseded by 0005)
+  size, and zoom centering (window sizing superseded by 0005; zoom-out floor and
+  browse-refit superseded by 0008)
 - [0005](0005-persist-window-position-and-size.md) — Persist and restore window
   position and size
 - [0006](0006-single-instance-reuse-window.md) — Single instance: reuse the open
   window for a new file (superseded by 0007)
 - [0007](0007-open-file-launches-in-new-windows.md) — Open file launches in new
   windows by default
+- [0008](0008-keep-zoom-while-browsing-and-allow-sub-fit-zoom.md) — Keep zoom while
+  browsing, and allow zoom below fit
