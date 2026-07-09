@@ -23,7 +23,7 @@ const BG: u32 = 0x00F5_F5F5; // viewport background (softbuffer: 0x00RRGGBB)
 const MIN_SCALE: f32 = 0.01;
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
-const SOUND_EXTS: &[&str] = &["wav"];
+const SOUND_EXTS: &[&str] = &["wav", "mp3", "flac", "ogg"];
 #[cfg(windows)]
 const REUSE_RUNNING_WINDOW_ON_FILE_OPEN: bool = false;
 

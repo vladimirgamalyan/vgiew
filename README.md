@@ -9,7 +9,7 @@ no clutter. A sound player is planned (see [`concept.md`](concept.md)).
 ## Status
 
 - **Image viewer — working MVP.**
-- Sound player — early: plays WAV files (opens a window, plays once; no controls yet).
+- Sound player — early: plays WAV, MP3, FLAC, OGG (opens a window, plays once; no controls yet).
 
 The whole design and the measurements behind the key decisions live in
 [`concept.md`](concept.md).
