@@ -16,7 +16,7 @@ use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Icon, WindowBuilder};
 
-const BG: u32 = 0x00F1_F1F1; // viewport background, matches XnView MP (softbuffer: 0x00RRGGBB)
+const BG: u32 = 0x00F5_F5F5; // viewport background (softbuffer: 0x00RRGGBB)
 
 // Absolute zoom-out floor (1%). Zoom-out is no longer floored at fit, so a below-fit
 // zoom can be carried across images while browsing (XnView-style); `0` refits.
@@ -1012,8 +1012,8 @@ fn main() {
     // painting before show does not populate what DWM displays on reveal. Instead we cloak
     // the window at the DWM level and then show it: it is composited (its surface exists)
     // but not displayed. We paint the first frame into that surface, then uncloak — the
-    // window appears already sized and painted. As a backstop, a dark class background
-    // brush keeps any stray erase from flashing white even if cloaking is unavailable.
+    // window appears already sized and painted. As a backstop, a class background brush in
+    // the same BG color keeps any stray erase from flashing white even if cloaking is unavailable.
     set_class_background(&window, BG);
     set_cloak(&window, true);
     window.set_visible(true);
