@@ -61,3 +61,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   windows by default
 - [0008](0008-keep-zoom-while-browsing-and-allow-sub-fit-zoom.md) — Keep zoom while
   browsing, and allow zoom below fit
+- [0009](0009-sound-in-same-binary-dispatched-by-type.md) — Play sound in the same
+  binary, dispatched by file type

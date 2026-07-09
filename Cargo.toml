@@ -11,6 +11,7 @@ softbuffer = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 rayon = "1"
 winreg = "0.52"
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
 
 [build-dependencies]
 winresource = "0.1"

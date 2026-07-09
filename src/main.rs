@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use rayon::prelude::*;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
+use winit::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Icon, WindowBuilder};
 
@@ -23,6 +23,7 @@ const BG: u32 = 0x00F5_F5F5; // viewport background (softbuffer: 0x00RRGGBB)
 const MIN_SCALE: f32 = 0.01;
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
+const SOUND_EXTS: &[&str] = &["wav"];
 #[cfg(windows)]
 const REUSE_RUNNING_WINDOW_ON_FILE_OPEN: bool = false;
 
@@ -43,6 +44,13 @@ fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn is_sound(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| SOUND_EXTS.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
 }
 
@@ -738,9 +746,9 @@ fn spawn_ipc_server(name: String, proxy: EventLoopProxy<UserEvent>) {
 
 fn print_help() {
     println!(
-        "vgiew — a fast image viewer\n\n\
+        "vgiew — a fast image and sound viewer\n\n\
          Usage:\n  \
-         vgiew <file>                        open an image\n  \
+         vgiew <file>                        open an image or sound\n  \
          vgiew --register                    register associations (HKCU, no admin)\n  \
          vgiew --unregister                  remove associations\n  \
          vgiew --dump <in> <out.png> [W H]   headless frame render\n  \
@@ -850,6 +858,88 @@ fn dump(args: &[String]) {
     println!("{w}x{h}: decode {dec_ms:.1} ms + pack {pack_ms:.1} ms  (-> {ww}x{wh}, fit {scale:.4})");
 }
 
+// ── Sound path ──────────────────────────────────────────────────────────────
+// A sound file opens a minimal window and plays once — no controls, no repeat.
+// Audio is initialized lazily here (only when a sound is actually opened), so the
+// image path pays nothing for linking rodio: no output device is opened otherwise.
+fn run_sound(path: &Path) {
+    // Best-effort playback: open the default output, decode, and queue the file.
+    // Keep the stream and player alive for the window's lifetime — dropping them
+    // stops playback. Any failure (no device, undecodable file) leaves the window
+    // up with no sound rather than aborting.
+    let _audio = rodio::DeviceSinkBuilder::open_default_sink()
+        .ok()
+        .map(|stream| {
+            let player = rodio::Player::connect_new(stream.mixer());
+            if let Ok(file) = std::fs::File::open(path) {
+                if let Ok(source) = rodio::Decoder::try_from(file) {
+                    player.append(source);
+                }
+            }
+            (stream, player)
+        });
+
+    let event_loop = EventLoop::new().unwrap();
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("—");
+    let window = Rc::new(
+        WindowBuilder::new()
+            .with_title(format!("vgiew — {name}"))
+            .with_window_icon(load_app_icon())
+            .with_inner_size(winit::dpi::LogicalSize::new(420.0, 120.0))
+            .with_resizable(false)
+            .with_visible(false)
+            .build(&event_loop)
+            .unwrap(),
+    );
+    let context = softbuffer::Context::new(window.clone()).unwrap();
+    let mut surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
+
+    // No-flash reveal (ADR 0003): cloak, show, paint the neutral background, uncloak.
+    // The window is a plain background pane — no widgets yet — while the file plays.
+    set_class_background(&window, BG);
+    set_cloak(&window, true);
+    window.set_visible(true);
+    {
+        let size = window.inner_size();
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        surface
+            .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
+            .unwrap();
+        let mut buffer = surface.buffer_mut().unwrap();
+        buffer.iter_mut().for_each(|p| *p = BG);
+        buffer.present().unwrap();
+    }
+    set_cloak(&window, false);
+
+    event_loop
+        .run(move |event, elwt| {
+            if let Event::WindowEvent { event, .. } = event {
+                match event {
+                    WindowEvent::CloseRequested => elwt.exit(),
+                    WindowEvent::KeyboardInput { event: key, .. } => {
+                        if key.state == ElementState::Pressed
+                            && matches!(key.logical_key.as_ref(), Key::Named(NamedKey::Escape))
+                        {
+                            elwt.exit();
+                        }
+                    }
+                    WindowEvent::RedrawRequested => {
+                        let size = window.inner_size();
+                        let (w, h) = (size.width.max(1), size.height.max(1));
+                        surface
+                            .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
+                            .unwrap();
+                        let mut buffer = surface.buffer_mut().unwrap();
+                        buffer.iter_mut().for_each(|p| *p = BG);
+                        buffer.present().unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .unwrap();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
@@ -888,6 +978,14 @@ fn main() {
         _ => {}
     }
     let arg = args.get(1).cloned();
+
+    // Sound files take the audio path; everything else is treated as an image.
+    if let Some(a) = &arg {
+        if is_sound(Path::new(a)) {
+            run_sound(Path::new(a));
+            return;
+        }
+    }
 
     // Optional reuse mode: if re-enabled, a file launch can hand its path to a
     // running viewer and exit instead of opening a second window.
