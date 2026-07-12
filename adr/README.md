@@ -63,3 +63,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   browsing, and allow zoom below fit
 - [0009](0009-sound-in-same-binary-dispatched-by-type.md) — Play sound in the same
   binary, dispatched by file type
+- [0010](0010-watch-folder-for-live-sibling-list.md) — Keep the sibling list live
+  via a folder watcher

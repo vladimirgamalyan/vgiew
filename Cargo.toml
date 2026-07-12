@@ -12,6 +12,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rayon = "1"
 winreg = "0.52"
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav", "mp3", "flac", "vorbis"] }
+notify = "8.2.0"
 
 [build-dependencies]
 winresource = "0.1"

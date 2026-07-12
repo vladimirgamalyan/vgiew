@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
+use notify::{EventKind, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
@@ -38,6 +40,8 @@ enum UserEvent {
     Failed { path: PathBuf, idx: usize },
     // Optional reuse mode: another process handed this window a file to open.
     Open(PathBuf),
+    // The watched folder changed on disk (debounced); rebuild the sibling list.
+    FolderChanged,
 }
 
 fn is_image(path: &Path) -> bool {
@@ -103,10 +107,9 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-// Builds the list of images in the opened file's folder and the current index.
-fn build_siblings(path: &Path) -> (Vec<PathBuf>, usize) {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut files: Vec<PathBuf> = std::fs::read_dir(parent)
+// Lists the images in `dir`, naturally sorted.
+fn scan_folder(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -118,6 +121,13 @@ fn build_siblings(path: &Path) -> (Vec<PathBuf>, usize) {
         let nb = b.file_name().and_then(|s| s.to_str()).unwrap_or("");
         natural_cmp(na, nb)
     });
+    files
+}
+
+// Builds the list of images in the opened file's folder and the current index.
+fn build_siblings(path: &Path) -> (Vec<PathBuf>, usize) {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let files = scan_folder(parent);
     let cur = files.iter().position(|p| p == path).unwrap_or(0);
     (files, cur)
 }
@@ -1041,6 +1051,43 @@ fn main() {
         Some(a) => build_siblings(Path::new(a)),
         None => (Vec::new(), 0),
     };
+    let mut folder: Option<PathBuf> = arg
+        .as_ref()
+        .map(|a| Path::new(a).parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+
+    // Watch the folder so images added or removed while browsing show up without
+    // restarting. Raw events land in a channel; a helper thread coalesces each burst
+    // (a file copy emits many) and reports once the folder has been quiet for a
+    // moment — which also avoids picking up half-written files. Watch errors are
+    // ignored: the viewer just keeps the startup list.
+    let (watch_tx, watch_rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        // Name/data changes can alter the list or make a failed file readable;
+        // access events are noise from our own decodes.
+        if let Ok(ev) = res {
+            if matches!(
+                ev.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
+                let _ = watch_tx.send(());
+            }
+        }
+    })
+    .ok();
+    if let (Some(w), Some(dir)) = (watcher.as_mut(), folder.as_deref()) {
+        let _ = w.watch(dir, RecursiveMode::NonRecursive);
+    }
+    {
+        let proxy = proxy.clone();
+        std::thread::spawn(move || {
+            while watch_rx.recv().is_ok() {
+                while watch_rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
+                if proxy.send_event(UserEvent::FolderChanged).is_err() {
+                    return; // event loop is gone
+                }
+            }
+        });
+    }
 
     // Decoded-image cache with neighbor prefetch; bounded to {prev, current, next}.
     let mut cache: HashMap<usize, DecodedImage> = HashMap::new();
@@ -1167,6 +1214,46 @@ fn main() {
                         update_title(&window, None, scale, &files, current);
                     }
                 }
+                UserEvent::FolderChanged => {
+                    // The watched folder changed on disk. Indices shift when entries
+                    // appear or vanish, so carry decoded images and the current
+                    // position over by path, not by index.
+                    let new_files = match folder.as_deref() {
+                        Some(dir) => scan_folder(dir),
+                        None => return,
+                    };
+                    if new_files == files {
+                        return;
+                    }
+                    let remapped = cache
+                        .drain()
+                        .filter_map(|(idx, img)| {
+                            let p = files.get(idx)?;
+                            Some((new_files.iter().position(|q| q == p)?, img))
+                        })
+                        .collect();
+                    cache = remapped;
+                    // In-flight decodes stay claimed only where index→path is
+                    // unchanged; results for shifted indices are dropped by the
+                    // path check above.
+                    inflight.retain(|&i| files.get(i).is_some() && files.get(i) == new_files.get(i));
+                    // Failures may be transient (a file first seen mid-copy); retry.
+                    failed.clear();
+                    current = files
+                        .get(current)
+                        .and_then(|p| new_files.iter().position(|q| q == p))
+                        .unwrap_or_else(|| current.min(new_files.len().saturating_sub(1)));
+                    files = new_files;
+                    if !files.is_empty() {
+                        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+                        prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
+                        evict(&mut cache, current, files.len());
+                    }
+                    update_title(&window, cache.get(&current), scale, &files, current);
+                    // No redraw here: if the current image survived, the frame is
+                    // unchanged; if it was removed, the redraw arrives with its
+                    // replacement's Decoded event.
+                }
                 UserEvent::Open(path) => {
                     // Optional reuse mode handed this window a file. Rebuild the
                     // folder list and drop all caches: old indices refer to the
@@ -1175,6 +1262,17 @@ fn main() {
                     let (new_files, new_current) = build_siblings(&path);
                     files = new_files;
                     current = new_current;
+                    // Re-point the folder watcher at the new file's folder.
+                    let new_folder = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                    if folder.as_deref() != Some(new_folder.as_path()) {
+                        if let Some(w) = watcher.as_mut() {
+                            if let Some(old) = folder.as_deref() {
+                                let _ = w.unwatch(old);
+                            }
+                            let _ = w.watch(&new_folder, RecursiveMode::NonRecursive);
+                        }
+                        folder = Some(new_folder);
+                    }
                     cache.clear();
                     inflight.clear();
                     failed.clear();
