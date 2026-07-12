@@ -24,6 +24,11 @@ const BG: u32 = 0x00F5_F5F5; // viewport background (softbuffer: 0x00RRGGBB)
 // zoom can be carried across images while browsing (XnView-style); `0` refits.
 const MIN_SCALE: f32 = 0.01;
 
+// At/above this zoom a 1px pixel grid is drawn between image pixels so adjacent
+// same-colored pixels are distinguishable. 8× makes each pixel ≥8 screen px, so
+// the line reads clearly without covering much of the pixel.
+const GRID_MIN_SCALE: f32 = 8.0;
+
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
 const SOUND_EXTS: &[&str] = &["wav", "mp3", "flac", "ogg"];
 #[cfg(windows)]
@@ -239,6 +244,19 @@ fn checker(dx: usize, dy: usize) -> (f32, f32, f32) {
     }
 }
 
+// Pixel-grid line color for a boundary drawn over the composited pixel `c` (0x00RRGGBB).
+// A fixed gray would vanish on a run of identical gray pixels — exactly the case the grid
+// exists for — so blend the pixel halfway toward the opposite luminance extreme instead:
+// the line always contrasts with the pixel it sits on, whatever its color.
+#[inline(always)]
+fn grid_tint(c: u32) -> u32 {
+    let (r, g, b) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+    let luma = (r * 77 + g * 150 + b * 29) >> 8; // Rec. 601, weights sum to 256
+    let target = if luma >= 128 { 0 } else { 255 };
+    let mix = |ch: u32| (ch + target) / 2;
+    (mix(r) << 16) | (mix(g) << 8) | mix(b)
+}
+
 // Nearest neighbor: crisp pixel edges when zooming in (scale >= 1), no blur.
 #[inline(always)]
 fn sample_nearest(img: &DecodedImage, sx: f32, sy: f32, br: f32, bg: f32, bb: f32) -> u32 {
@@ -296,18 +314,44 @@ fn draw(img: Option<&DecodedImage>, buf: &mut [u32], ww: u32, wh: u32, scale: f3
             let wh_f = wh as f32;
             // Zoom in (scale >= 1) — nearest (crisp pixels); zoom out — bilinear.
             let nearest = scale >= 1.0;
+            // Pixel grid: at high zoom mark the left/top edge of each image pixel. A screen
+            // pixel is a grid line when it maps to a different image pixel than its left/upper
+            // neighbor. `col_edge` is row-independent, so precompute it once for all rows.
+            let grid = nearest && scale >= GRID_MIN_SCALE;
+            let col_edge: Vec<bool> = if grid {
+                let sx_floor = |dx: f32| (cx + (dx - ww_f / 2.0) / scale).floor();
+                (0..ww as usize)
+                    .map(|dx| sx_floor(dx as f32) != sx_floor(dx as f32 - 1.0))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             buf.par_chunks_mut(ww as usize)
                 .enumerate()
                 .for_each(|(dy, row)| {
                     let sy = cy + (dy as f32 - wh_f / 2.0) / scale;
+                    let row_edge =
+                        grid && sy.floor() != (cy + (dy as f32 - 1.0 - wh_f / 2.0) / scale).floor();
                     for (dx, px) in row.iter_mut().enumerate() {
                         let sx = cx + (dx as f32 - ww_f / 2.0) / scale;
                         let (br, bg, bb) = checker(dx, dy);
-                        *px = if nearest {
+                        let mut c = if nearest {
                             sample_nearest(im, sx, sy, br, bg, bb)
                         } else {
                             sample(im, sx, sy, br, bg, bb)
                         };
+                        // Draw the grid line only over the image itself, not the surrounding
+                        // background (matches sample_nearest's in-bounds region).
+                        if grid
+                            && (row_edge || col_edge[dx])
+                            && sx >= 0.0
+                            && sy >= 0.0
+                            && sx < im.w as f32
+                            && sy < im.h as f32
+                        {
+                            c = grid_tint(c);
+                        }
+                        *px = c;
                     }
                 });
         }

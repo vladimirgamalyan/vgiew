@@ -65,3 +65,4 @@ Before proposing or re-proposing a decision that feels debatable, check
   binary, dispatched by file type
 - [0010](0010-watch-folder-for-live-sibling-list.md) — Keep the sibling list live
   via a folder watcher
+- [0011](0011-pixel-grid-at-high-zoom.md) — Draw a pixel grid at high zoom
