@@ -25,7 +25,7 @@ The whole design and the measurements behind the key decisions live in
 
 ## Features (images)
 
-- Fit-to-window with letterboxing; window title shows name, pixel size, and zoom.
+- Fit-to-window with letterboxing; window title shows name, pixel size, file size, and zoom.
 - Zoom to the point under the cursor; drag to pan; fullscreen.
 - **Crisp zoom:** nearest-neighbor when zooming in (sharp pixel edges), bilinear when
   zooming out (no aliasing).

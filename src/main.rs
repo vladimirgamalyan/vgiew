@@ -63,6 +63,25 @@ fn is_sound(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// Human-readable byte count, Windows Explorer style: 1024-based steps labeled KB/MB/GB.
+// A step is entered once the value rounds to a full unit at the precision shown, so a size
+// just under 1 MB reads "1.00 MB" instead of a self-contradicting "1024.0 KB".
+fn format_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b / GB >= 0.995 {
+        format!("{:.2} GB", b / GB)
+    } else if b / MB >= 0.995 {
+        format!("{:.2} MB", b / MB)
+    } else if b / KB >= 0.95 {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 // Natural sort (file2 before file10), case-insensitive.
 fn natural_cmp(a: &str, b: &str) -> Ordering {
     let mut ai = a.chars().peekable();
@@ -1167,19 +1186,26 @@ fn main() {
                         scale: f32,
                         files: &[PathBuf],
                         current: usize| {
-        let name = files
-            .get(current)
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            .unwrap_or("—");
+        // No file at all (empty folder, or launched bare) — nothing is pending, so say
+        // nothing rather than advertise a load that will never finish.
+        let Some(path) = files.get(current) else {
+            window.set_title("vgiew");
+            return;
+        };
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("—");
+        // Empty string when the file is gone, so the title just drops the segment.
+        let size = std::fs::metadata(path)
+            .ok()
+            .map(|m| format!("  {}", format_size(m.len())))
+            .unwrap_or_default();
         match img {
             Some(im) => window.set_title(&format!(
-                "vgiew — {name}  [{}×{}]  {:.0}%",
+                "vgiew — {name}  [{}×{}]{size}  {:.0}%",
                 im.w,
                 im.h,
                 scale * 100.0
             )),
-            None => window.set_title(&format!("vgiew — {name}  (loading…)")),
+            None => window.set_title(&format!("vgiew — {name}{size}  (loading…)")),
         }
     };
     update_title(&window, None, scale, &files, current);
