@@ -677,7 +677,6 @@ fn ipc_pipe_name() -> String {
 // Absolute path from a possibly-relative CLI arg, without touching the filesystem or
 // adding a \\?\ verbatim prefix (which canonicalize would). Explorer already passes
 // absolute paths; this covers a relative path typed on the command line.
-#[cfg(windows)]
 fn absolutize(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
@@ -1050,12 +1049,17 @@ fn main() {
         }
         _ => {}
     }
-    let arg = args.get(1).cloned();
+    // Absolutize once, up front. `Path::parent()` of a bare `vgiew a.png` is Some("")
+    // rather than None, so the `.` fallbacks below never fire and the folder scan reads
+    // an empty path; and even with that fallback, read_dir would yield `.\a.png`, which
+    // never compares equal to the `a.png` we were given, so the sibling list could not
+    // find the opened file. An absolute arg makes both agree.
+    let arg: Option<PathBuf> = args.get(1).map(|a| absolutize(Path::new(a)));
 
     // Sound files take the audio path; everything else is treated as an image.
     if let Some(a) = &arg {
-        if is_sound(Path::new(a)) {
-            run_sound(Path::new(a));
+        if is_sound(a) {
+            run_sound(a);
             return;
         }
     }
@@ -1065,7 +1069,7 @@ fn main() {
     #[cfg(windows)]
     if REUSE_RUNNING_WINDOW_ON_FILE_OPEN {
         if let Some(a) = &arg {
-            if forward_to_running_instance(Path::new(a)) {
+            if forward_to_running_instance(a) {
                 return;
             }
         }
@@ -1111,12 +1115,12 @@ fn main() {
 
     // Image list and current index.
     let (mut files, mut current): (Vec<PathBuf>, usize) = match &arg {
-        Some(a) => build_siblings(Path::new(a)),
+        Some(a) => build_siblings(a),
         None => (Vec::new(), 0),
     };
     let mut folder: Option<PathBuf> = arg
         .as_ref()
-        .map(|a| Path::new(a).parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+        .map(|a| a.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
 
     // Watch the folder so images added or removed while browsing show up without
     // restarting. Raw events land in a channel; a helper thread coalesces each burst
