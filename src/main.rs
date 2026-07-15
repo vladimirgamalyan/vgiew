@@ -574,6 +574,67 @@ fn notify_assoc_changed() {
     }
 }
 
+// Move a file to the Recycle Bin. Returns false if the shell could not do it, so the
+// caller leaves the list alone.
+#[cfg(windows)]
+fn move_to_recycle_bin(window: &winit::window::Window, path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[repr(C)]
+    struct ShFileOpStructW {
+        hwnd: *mut core::ffi::c_void,
+        w_func: u32,
+        p_from: *const u16,
+        p_to: *const u16,
+        f_flags: u16,
+        f_any_operations_aborted: i32,
+        h_name_mappings: *mut core::ffi::c_void,
+        lpsz_progress_title: *const u16,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHFileOperationW(lp_file_op: *mut ShFileOpStructW) -> i32;
+    }
+    const FO_DELETE: u32 = 0x0003;
+    const FOF_SILENT: u16 = 0x0004;
+    const FOF_NOCONFIRMATION: u16 = 0x0010;
+    const FOF_ALLOWUNDO: u16 = 0x0040;
+    // Recycling is the whole point of the key: when the shell cannot recycle (network
+    // share, bin disabled) it deletes permanently instead, so keep that one prompt.
+    const FOF_WANTNUKEWARNING: u16 = 0x4000;
+
+    // pFrom is a double-null-terminated list. The shell resolves a relative path against
+    // its own idea of the current directory, so pass a full one (but not the \\?\ form,
+    // which SHFileOperationW does not accept).
+    let mut from: Vec<u16> = absolutize(path).as_os_str().encode_wide().collect();
+    from.push(0);
+    from.push(0);
+    let hwnd = window
+        .window_handle()
+        .ok()
+        .and_then(|h| match h.as_raw() {
+            RawWindowHandle::Win32(w) => Some(w.hwnd.get() as *mut core::ffi::c_void),
+            _ => None,
+        })
+        .unwrap_or(core::ptr::null_mut());
+    let mut op = ShFileOpStructW {
+        hwnd,
+        w_func: FO_DELETE,
+        p_from: from.as_ptr(),
+        p_to: core::ptr::null(),
+        f_flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_WANTNUKEWARNING,
+        f_any_operations_aborted: 0,
+        h_name_mappings: core::ptr::null_mut(),
+        lpsz_progress_title: core::ptr::null(),
+    };
+    // Aborted covers the user declining the permanent-delete warning.
+    unsafe { SHFileOperationW(&mut op) == 0 && op.f_any_operations_aborted == 0 }
+}
+#[cfg(not(windows))]
+fn move_to_recycle_bin(_window: &winit::window::Window, _path: &Path) -> bool {
+    false
+}
+
 // Cloak/uncloak the window at the DWM level. A cloaked window is composited (its surface
 // exists, so a GDI present lands in it) but not displayed. This lets us reveal the window
 // only after its first frame is painted, with no white flash on show.
@@ -1299,6 +1360,7 @@ fn main() {
                     if new_files == files {
                         return;
                     }
+                    let shown = files.get(current).cloned();
                     let remapped = cache
                         .drain()
                         .filter_map(|(idx, img)| {
@@ -1323,10 +1385,22 @@ fn main() {
                         prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
                         evict(&mut cache, current, files.len());
                     }
+                    // If the file on screen survived, the frame is unchanged. If it left the
+                    // list, `current` now points at a neighbor: show it like a browse step
+                    // would (refit at fit, else carry the zoom). Redraw unconditionally —
+                    // a browse miss may keep the old frame because it still exists, but this
+                    // frame is a file that is gone, so paint the neighbor if it is cached and
+                    // the empty viewport otherwise, rather than lie until Decoded lands.
+                    if files.get(current) != shown.as_ref() {
+                        let size = window.inner_size();
+                        if fit_mode {
+                            apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
+                        } else if let Some(im) = cache.get(&current) {
+                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                        }
+                        window.request_redraw();
+                    }
                     update_title(&window, cache.get(&current), scale, &files, current);
-                    // No redraw here: if the current image survived, the frame is
-                    // unchanged; if it was removed, the redraw arrives with its
-                    // replacement's Decoded event.
                 }
                 UserEvent::Open(path) => {
                     // Optional reuse mode handed this window a file. Rebuild the
@@ -1462,6 +1536,24 @@ fn main() {
                                 }
                                 prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
                                 evict(&mut cache, current, files.len());
+                            }
+                        }
+                        Key::Named(NamedKey::Delete) => {
+                            // Arrows repeat by design, but this key destroys files with no
+                            // confirmation to catch it (ADR 0012): one held key would recycle
+                            // a run of images at the OS repeat rate. Act on real presses only.
+                            if key.repeat {
+                                return;
+                            }
+                            if let Some(path) = files.get(current).cloned() {
+                                if move_to_recycle_bin(&window, &path) {
+                                    // Rebuild now rather than waiting out the watcher's
+                                    // debounce; the watcher's own event lands later and
+                                    // finds the list already correct. The rebuild moves
+                                    // `current` onto the next file (or the previous one
+                                    // if the deleted file was last).
+                                    let _ = proxy.send_event(UserEvent::FolderChanged);
+                                }
                             }
                         }
                         Key::Named(NamedKey::Escape) => {
