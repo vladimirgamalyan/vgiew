@@ -2,14 +2,15 @@
 
 A fast, minimal image viewer for Windows, built for **instant startup**. Double-click
 an image in Explorer and it's on screen in tens of milliseconds — no splash, no runtime,
-no clutter. A sound player is planned (see [`concept.md`](concept.md)).
+no clutter.
 
 > The name is a working title and may change.
 
 ## Status
 
 - **Image viewer — working MVP.**
-- Sound player — early: plays WAV, MP3, FLAC, OGG (opens a window with play/stop and repeat buttons).
+
+Sound playback used to live here too; it now has its own project, **vgplay**.
 
 The whole design and the measurements behind the key decisions live in
 [`concept.md`](concept.md).

@@ -1,7 +1,7 @@
 # vgiew — concept
 
-> A fast, simple Windows 11 utility: opens an image or plays a sound on double-click
-> in Explorer. One window, instant startup, minimal clutter.
+> A fast, simple Windows 11 utility: opens an image on double-click in Explorer.
+> One window, instant startup, minimal clutter.
 
 *The name is a working title (after the project folder) and can be changed.*
 
@@ -9,21 +9,21 @@
 
 ## 1. Goal and principles
 
-Replace the heavyweight built-in apps ("Photos", "Media Player") with a lightweight
-utility that opens instantly and does exactly one thing: show the file.
+Replace the heavyweight built-in "Photos" app with a lightweight
+utility that opens instantly and does exactly one thing: show the image.
 
 ### ⭐ Primary goal — the fastest possible response
 
 **This is priority #1, and every other decision is subordinate to it.** The time
-between the double-click and the image appearing on screen (or the sound starting)
-must be as short as possible — ideally imperceptible. If a feature gets in the way
-of startup or response speed, it is trimmed or deferred.
+between the double-click and the image appearing on screen must be as short as
+possible — ideally imperceptible. If a feature gets in the way of startup or
+response speed, it is trimmed or deferred.
 
 Targets (a direction, not hard limits):
 
 - Cold start to first frame — **tens of milliseconds**, an "instant" feel.
 - Browsing `←/→` to a neighboring file — **no delay**, the frame is already ready.
-- Reaction to zoom/pan/seek — **within the same frame**, no stalls.
+- Reaction to zoom/pan — **within the same frame**, no stalls.
 
 How this is achieved:
 
@@ -46,12 +46,10 @@ How this is achieved:
 
 ## 2. What it does
 
-A single `vgiew.exe` decides what to show based on the type of the passed file:
+A single `vgiew.exe` opens the image passed as a file argument in a viewer window
+with fit, zoom, pan, and fullscreen.
 
-- **Image** → a viewer window with fit, zoom, pan, fullscreen.
-- **Sound** → a compact player window with playback and seeking.
-
-The type is determined by extension (and by file signature when needed).
+The file type is determined by content (file signature), not just the extension.
 
 ---
 
@@ -60,9 +58,8 @@ The type is determined by extension (and by file signature when needed).
 | Category | Formats |
 |----------|---------|
 | Images   | JPG, PNG, GIF (first frame), BMP, WEBP |
-| Sound    | WAV, MP3, FLAC, OGG |
 
-Future (not in MVP): AVIF/HEIC/JXL for images; M4A/AAC, Opus for sound.
+Future (not in MVP): AVIF/HEIC/JXL.
 
 ---
 
@@ -115,37 +112,16 @@ Implementation details:
 
 ---
 
-## 6. Sound player
+## 6. Folder navigation
 
-A compact window with:
-
-- File name.
-- A **play/pause** button.
-- A **progress bar** with seeking (click/drag).
-- Current time / total duration.
-- A **volume** control.
-
-Behavior:
-
-- Playback starts automatically on open.
-- `Space` — play/pause; `←/→` in the player switch to a neighboring **audio** file
-  (seeking within a track is a separate key, see the table).
-
-*Future (optional):* visualization — a waveform or spectrum.
-
----
-
-## 7. Folder navigation
-
-- The arrows `←/→` browse files of **the same type only** as the opened one:
-  opened an image → browse images, opened a sound → sounds.
+- The arrows `←/→` browse the images in the opened file's folder.
 - Ordering is **natural sort** by name, like in Explorer
   (`file2` before `file10`), case-insensitive.
 - The neighbor list is built from the opened file's folder at launch time.
 
 ---
 
-## 8. Technology stack
+## 7. Technology stack
 
 Language — **Rust**. Stack for the chosen CPU path (Tier C, see the measurements below):
 
@@ -154,16 +130,13 @@ Language — **Rust**. Stack for the chosen CPU path (Tier C, see the measuremen
 | Window and events | `winit` |
 | Pixel buffer output | `softbuffer` |
 | Scaling/resampling | custom, multithreaded (`std::thread` / `rayon`) |
-| Player UI (widgets, text) | custom drawing + `ab_glyph` / `fontdue` rasterizer |
 | Image decoding | `image` (JPG/PNG/GIF/BMP/WEBP) |
-| Audio playback | `rodio` |
-| Audio decoding | `symphonia` (via `rodio`) |
 | Natural sort | e.g. `natord` / custom |
 
 `eframe`/`egui` was considered as the "batteries-included" option, but measurements
 showed a startup ~3–5× slower than the CPU path (GPU context bring-up) — rejected for
-the primary "instant startup" goal. The price of softbuffer is hand-drawing the player
-UI, but the amount is small.
+the primary "instant startup" goal. The price of softbuffer is hand-drawing any UI,
+but the image viewer needs almost none.
 
 Build: `--release`, LTO, `panic = "abort"`, `strip`, a single self-contained `.exe`
 for x86_64 Windows.
@@ -262,8 +235,8 @@ Conclusions:
 
 **The CPU path (Tier C) wins on both fronts:** startup ~46 ms (3–5× faster than any GPU
 config, including tuned wgpu 22, and 12× faster than old pixels) and interaction >60 FPS
-even single-threaded, 144 Hz+ with MT. The only real price is **hand-drawing the player UI**
-(widgets + text rasterizer); the image viewer needs almost no UI. A GPU path is justified
+even single-threaded, 144 Hz+ with MT. The only real price is **hand-drawing any UI**,
+but the image viewer needs almost none. A GPU path is justified
 only for 4K fullscreen present.
 
 **Decision (confirmed by measurements):** the base graphics path is **Tier C (softbuffer +
@@ -310,43 +283,42 @@ and decoder time — which are the same.
 Meanwhile Rust offers advantages specifically for this task:
 
 - **Memory safety without a GC** — the utility parses arbitrary (including malformed) files,
-  and image/audio decoders are a classic source of crashes and vulnerabilities.
-- **Ecosystem** (`image`, `rodio`, `symphonia`, `eframe`) plugs in with a single line;
+  and image decoders are a classic source of crashes and vulnerabilities.
+- **Ecosystem** (`image`, `eframe`) plugs in with a single line;
   in C++ the same capabilities mean wrangling vcpkg/CMake and manual builds.
 - **Faster to a working, fast MVP**, and the real speed wins are in the startup
   architecture (see section 1), not the language.
 
 ---
 
-## 9. Hotkeys (summary)
+## 8. Hotkeys (summary)
 
-| Key | Images | Sound |
-|-----|--------|-------|
-| `←` / `→` | previous / next file | previous / next track |
-| `Esc` | exit fullscreen / close | close |
-| `F` / `Enter` | fullscreen on/off | — |
-| Mouse wheel | zoom | volume |
-| Drag | pan | seek (drag on the bar) |
-| `Space` | next file | play / pause |
-| `1` / `0` | 1:1 scale / fit | — |
+| Key | Action |
+|-----|--------|
+| `←` / `→` | previous / next image |
+| `Esc` | exit fullscreen / close |
+| `F` / `Enter` | fullscreen on/off |
+| Mouse wheel | zoom |
+| Drag | pan |
+| `Space` | next image |
+| `1` / `0` | 1:1 scale / fit |
 
 *The layout is preliminary; to be refined during implementation.*
 
 ---
 
-## 10. Non-goals
+## 9. Non-goals
 
 To stay "fast and simple", the utility does **not**:
 
 - Editing, rotate-with-save, format conversion.
 - A gallery/thumbnail grid, cataloguing, tags.
-- Playlists, an equalizer, network streaming.
 - A settings "kitchen sink", themes, plugins.
 - GIF animation and drag-and-drop into the window (deferred as out of scope).
 
 ---
 
-## 11. Development stages
+## 10. Development stages
 
 1. **Image MVP** — in progress. Done and verified: window (winit+softbuffer),
    open by argument, background decode (window shows immediately), format detection
@@ -357,18 +329,16 @@ To stay "fast and simple", the utility does **not**:
    Implemented but not yet verified live: zoom-to-cursor, pan, fullscreen
    (`F`/`Enter`/`Esc`), `0`/`1` (fit/100%).
    There is a headless `--dump <in> <out.png>` mode for render checks.
-2. **Sound MVP:** type detection, player window, play/pause, progress, volume,
-   browsing through sounds.
-3. **Polish:** ✔ Done: transparency checkerboard, neighbor prefetch,
+2. **Polish:** ✔ Done: transparency checkerboard, neighbor prefetch,
    parallel RGBA pack, natural sort. (GIF animation and drag-and-drop → non-goals.)
-4. **Optional:** reusing a single window on a repeated double-click
-   (single-instance via a named pipe), extra formats, sound visualization.
+3. **Optional:** reusing a single window on a repeated double-click
+   (single-instance via a named pipe), extra formats.
    ✔ `--register`/`--unregister` + `install.ps1`/`uninstall.ps1` — already done
    (intermediate releases, see section 4).
 
 ---
 
-## 12. Open questions
+## 11. Open questions
 
 - Final name of the utility and the `.exe`.
 - Do we need a delete command (`Del` → Recycle Bin) right from the window?

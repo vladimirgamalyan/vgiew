@@ -62,9 +62,13 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0008](0008-keep-zoom-while-browsing-and-allow-sub-fit-zoom.md) — Keep zoom while
   browsing, and allow zoom below fit
 - [0009](0009-sound-in-same-binary-dispatched-by-type.md) — Play sound in the same
-  binary, dispatched by file type
+  binary, dispatched by file type (superseded by 0014)
 - [0010](0010-watch-folder-for-live-sibling-list.md) — Keep the sibling list live
   via a folder watcher
 - [0011](0011-pixel-grid-at-high-zoom.md) — Draw a pixel grid at high zoom
 - [0012](0012-delete-to-recycle-bin-without-confirmation.md) — Delete to the
   Recycle Bin on Del, without a confirmation prompt
+- [0013](0013-sound-player-controls-play-stop-repeat.md) — Sound player controls:
+  hand-drawn play/stop and repeat toggle (now lives in vgplay, see 0014)
+- [0014](0014-split-sound-into-separate-vgplay-project.md) — Split sound playback
+  into a separate vgplay project (supersedes 0009)

@@ -1,6 +1,6 @@
 # 0009. Play sound in the same binary, dispatched by file type
 
-Status: Accepted
+Status: Superseded by 0014
 
 ## Context
 
