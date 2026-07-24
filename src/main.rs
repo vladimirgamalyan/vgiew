@@ -15,7 +15,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen, Icon, WindowBuilder};
 
 const BG: u32 = 0x00F5_F5F5; // viewport background (softbuffer: 0x00RRGGBB)
@@ -627,6 +627,179 @@ fn move_to_recycle_bin(_window: &winit::window::Window, _path: &Path) -> bool {
     false
 }
 
+// Put the current image on the clipboard on Ctrl+C, in two formats at once so it pastes
+// either way: CF_HDROP (the file, exactly as Explorer copies it, for folders/apps that
+// take files) and CF_DIBV5 (the pixels, for image editors like Photoshop). Windows
+// synthesizes CF_DIB/CF_BITMAP from the DIBV5 for apps that want those. `img` is the
+// decoded frame when available; if it is missing (still decoding) only the file goes on.
+// No visual feedback, by design.
+#[cfg(windows)]
+fn copy_to_clipboard(window: &winit::window::Window, path: &Path, img: Option<&DecodedImage>) {
+    use std::os::windows::ffi::OsStrExt as _;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[repr(C)]
+    struct DropFiles {
+        p_files: u32,
+        pt: [i32; 2],
+        f_nc: i32,
+        f_wide: i32,
+    }
+    // BITMAPV5HEADER: 32bpp with an explicit alpha mask, so transparency survives the paste.
+    #[repr(C)]
+    struct BitmapV5Header {
+        size: u32,
+        width: i32,
+        height: i32,
+        planes: u16,
+        bit_count: u16,
+        compression: u32,
+        size_image: u32,
+        x_ppm: i32,
+        y_ppm: i32,
+        clr_used: u32,
+        clr_important: u32,
+        red_mask: u32,
+        green_mask: u32,
+        blue_mask: u32,
+        alpha_mask: u32,
+        cs_type: u32,
+        endpoints: [i32; 9],
+        gamma_red: u32,
+        gamma_green: u32,
+        gamma_blue: u32,
+        intent: u32,
+        profile_data: u32,
+        profile_size: u32,
+        reserved: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut core::ffi::c_void) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn CloseClipboard() -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut core::ffi::c_void;
+        fn GlobalFree(hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn GlobalLock(hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        fn GlobalUnlock(hmem: *mut core::ffi::c_void) -> i32;
+    }
+    const CF_HDROP: u32 = 15;
+    const CF_DIBV5: u32 = 17;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    const BI_BITFIELDS: u32 = 3;
+    const LCS_SRGB: u32 = 0x7352_4742; // 'sRGB'
+
+    // Copy a byte block onto the clipboard under `format`. On success the clipboard owns
+    // the block; free it only if the hand-off failed. Assumes the clipboard is already open.
+    let set_bytes = |format: u32, bytes: &[u8]| unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+        if hmem.is_null() {
+            return;
+        }
+        let base = GlobalLock(hmem);
+        if base.is_null() {
+            GlobalFree(hmem);
+            return;
+        }
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, bytes.len());
+        GlobalUnlock(hmem);
+        if SetClipboardData(format, hmem).is_null() {
+            GlobalFree(hmem);
+        }
+    };
+
+    // CF_HDROP: DROPFILES header + wide, double-null-terminated path list (a single file).
+    let mut hdrop: Vec<u8> = Vec::new();
+    let drop_hdr = DropFiles {
+        p_files: core::mem::size_of::<DropFiles>() as u32,
+        pt: [0, 0],
+        f_nc: 0,
+        f_wide: 1,
+    };
+    hdrop.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(
+            &drop_hdr as *const DropFiles as *const u8,
+            core::mem::size_of::<DropFiles>(),
+        )
+    });
+    let mut wide: Vec<u16> = absolutize(path).as_os_str().encode_wide().collect();
+    wide.push(0);
+    wide.push(0);
+    hdrop.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2)
+    });
+
+    // CF_DIBV5: header + pixels. `px` is 0xAARRGGBB u32; its little-endian bytes are
+    // B,G,R,A, exactly the byte order a 32bpp DIB wants, so the pixels copy through as-is.
+    // A negative height makes the DIB top-down, matching our row order (no vertical flip).
+    let dibv5 = img.map(|im| {
+        let bytes = im.px.len() * 4;
+        let dib_hdr = BitmapV5Header {
+            size: core::mem::size_of::<BitmapV5Header>() as u32,
+            width: im.w as i32,
+            height: -(im.h as i32),
+            planes: 1,
+            bit_count: 32,
+            compression: BI_BITFIELDS,
+            size_image: bytes as u32,
+            x_ppm: 0,
+            y_ppm: 0,
+            clr_used: 0,
+            clr_important: 0,
+            red_mask: 0x00FF_0000,
+            green_mask: 0x0000_FF00,
+            blue_mask: 0x0000_00FF,
+            alpha_mask: 0xFF00_0000,
+            cs_type: LCS_SRGB,
+            endpoints: [0; 9],
+            gamma_red: 0,
+            gamma_green: 0,
+            gamma_blue: 0,
+            intent: 0,
+            profile_data: 0,
+            profile_size: 0,
+            reserved: 0,
+        };
+        let mut buf: Vec<u8> = Vec::with_capacity(core::mem::size_of::<BitmapV5Header>() + bytes);
+        buf.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(
+                &dib_hdr as *const BitmapV5Header as *const u8,
+                core::mem::size_of::<BitmapV5Header>(),
+            )
+        });
+        buf.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(im.px.as_ptr() as *const u8, bytes)
+        });
+        buf
+    });
+
+    let hwnd = window
+        .window_handle()
+        .ok()
+        .and_then(|h| match h.as_raw() {
+            RawWindowHandle::Win32(w) => Some(w.hwnd.get() as *mut core::ffi::c_void),
+            _ => None,
+        })
+        .unwrap_or(core::ptr::null_mut());
+
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return;
+        }
+        EmptyClipboard();
+        set_bytes(CF_HDROP, &hdrop);
+        if let Some(dib) = &dibv5 {
+            set_bytes(CF_DIBV5, dib);
+        }
+        CloseClipboard();
+    }
+}
+#[cfg(not(windows))]
+fn copy_to_clipboard(_window: &winit::window::Window, _path: &Path, _img: Option<&DecodedImage>) {}
+
 // Cloak/uncloak the window at the DWM level. A cloaked window is composited (its surface
 // exists, so a GDI present lands in it) but not displayed. This lets us reveal the window
 // only after its first frame is painted, with no white flash on show.
@@ -1134,6 +1307,7 @@ fn main() {
     // Input.
     let mut mouse = (0.0f32, 0.0f32);
     let mut dragging = false;
+    let mut modifiers = ModifiersState::empty();
 
     // Last known windowed (non-fullscreen) geometry; persisted to the registry on exit.
     let mut win_geom: (i32, i32, u32, u32) = {
@@ -1403,8 +1577,22 @@ fn main() {
                         }
                     }
                 }
+                WindowEvent::ModifiersChanged(m) => {
+                    modifiers = m.state();
+                }
                 WindowEvent::KeyboardInput { event: key, .. } => {
                     if key.state != ElementState::Pressed {
+                        return;
+                    }
+                    // Ctrl+C: copy the current file to the clipboard as Explorer would.
+                    // Match the physical C key, since the logical key under Ctrl varies by
+                    // layout (it can arrive as a control character rather than "c").
+                    if modifiers.control_key()
+                        && key.physical_key == PhysicalKey::Code(KeyCode::KeyC)
+                    {
+                        if let Some(path) = files.get(current).cloned() {
+                            copy_to_clipboard(&window, &path, cache.get(&current));
+                        }
                         return;
                     }
                     let size = window.inner_size();
