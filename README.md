@@ -24,29 +24,14 @@ The whole design and the measurements behind the key decisions live in
   full cold-start and interaction benchmarks.
 - Multithreaded resampling (`rayon`) — smooth zoom/pan even on 24 MP images.
 
-## Features (images)
+## Features
 
-- Fit-to-window with letterboxing; window title shows name, pixel size, file size, and zoom.
-- Zoom to the point under the cursor; drag to pan; fullscreen.
-- **Crisp zoom:** nearest-neighbor when zooming in (sharp pixel edges), bilinear when
-  zooming out (no aliasing).
-- Browse neighboring images in the same folder, natural sort order (`file2` before `file10`).
-- Formats: JPG, PNG, GIF (first frame), BMP, WEBP. Format is detected by content, not
-  by extension.
-- Background/transparency composited over a neutral dark background.
+Fast startup and switching, fit-to-window, cursor-centered zoom and pan, crisp
+resampling, folder browsing in natural sort order, copy to clipboard (`Ctrl+C`, as
+both file and pixels), delete to the Recycle Bin, and fullscreen. Formats: JPG, PNG,
+GIF (first frame), BMP, WEBP, detected by content.
 
-## Hotkeys
-
-| Key | Action |
-|-----|--------|
-| `←` / `→` | previous / next image |
-| `Del` | move image to the Recycle Bin, show the next one |
-| Mouse wheel | zoom to cursor |
-| Left-drag | pan |
-| `F` / `Enter` | toggle fullscreen |
-| `Esc` | exit fullscreen / close |
-| `0` | fit to window |
-| `1` | 100% (1:1) |
+See **[docs/FEATURES.md](docs/FEATURES.md)** for the full feature list and hotkey reference.
 
 ## Build
 
