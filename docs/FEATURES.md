@@ -71,8 +71,9 @@ Details:
 - **Single instance:** opening another image reuses the already-running window instead of
   spawning a second process, which keeps subsequent opens fast.
 - **Drag & drop:** dropping an image on the window opens it there, like a double-click
-  would, and switches browsing to that image's folder. Files that are not images (and
-  folders) are ignored — the current image stays on screen.
+  would, and switches browsing to that image's folder. Zoom and pan carry over just as
+  they do with `←` / `→`. Files that are not images (and folders) are ignored — the
+  current image stays on screen.
 - **Window position and size are remembered** between runs.
 - **File associations:** `install.ps1` registers vgiew so a double-click in Explorer opens
   it (see the README for setup).

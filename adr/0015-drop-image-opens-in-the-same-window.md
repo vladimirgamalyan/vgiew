@@ -1,6 +1,7 @@
 # 0015. A dropped image opens in the same window
 
-Status: Accepted
+Status: Accepted; the refit-on-drop consequence superseded by
+[0018](0018-dropped-image-lands-like-a-browse-step.md)
 
 ## Context
 

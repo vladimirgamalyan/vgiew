@@ -73,8 +73,10 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0014](0014-split-sound-into-separate-vgplay-project.md) — Split sound playback
   into a separate vgplay project (supersedes 0009)
 - [0015](0015-drop-image-opens-in-the-same-window.md) — A dropped image opens in
-  the same window
+  the same window (refit-on-drop superseded by 0018)
 - [0016](0016-svg-via-resvg-rasterize-the-viewport.md) — SVG via resvg, rasterizing
   the viewport rather than the image
 - [0017](0017-view-semantics-for-a-format-without-a-natural-size.md) — Open scale,
   `[W×H]` and `Ctrl+C` for a format with no natural pixel size
+- [0018](0018-dropped-image-lands-like-a-browse-step.md) — A dropped image lands
+  like a browse step, keeping the zoom

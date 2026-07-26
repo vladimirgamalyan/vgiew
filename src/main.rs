@@ -1900,8 +1900,8 @@ fn main() {
                     update_title(&window, cache.get(&current), scale, &files, current);
                 }
                 UserEvent::Open(path) => {
-                    // Optional reuse mode handed this window a file. Rebuild the
-                    // folder list and drop all caches: old indices refer to the
+                    // A drop (or optional reuse mode) handed this window a file. Rebuild
+                    // the folder list and drop all caches: old indices refer to the
                     // previous folder, and stale in-flight decodes are ignored by
                     // the path check above.
                     let (new_files, new_current) = build_siblings(&path);
@@ -1921,7 +1921,9 @@ fn main() {
                     cache.clear();
                     inflight.clear();
                     failed.clear();
-                    fit_mode = true;
+                    // `fit_mode` is left as it is, so the new file lands like a browse
+                    // step: refit when at fit, otherwise carry the literal zoom and pan
+                    // (the Decoded handler applies whichever) — see ADR 0018.
                     if !files.is_empty() {
                         ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                     }
