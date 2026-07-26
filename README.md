@@ -28,7 +28,7 @@ The whole design and the measurements behind the key decisions live in
 
 Fast startup and switching, fit-to-window, cursor-centered zoom and pan, crisp
 resampling, folder browsing in natural sort order, copy to clipboard (`Ctrl+C`, as
-both file and pixels), delete to the Recycle Bin, and fullscreen. Formats: JPG, PNG,
+both file and pixels), delete to the Recycle Bin, drag & drop to open, and fullscreen. Formats: JPG, PNG,
 GIF (first frame), BMP, WEBP, detected by content.
 
 See **[docs/FEATURES.md](docs/FEATURES.md)** for the full feature list and hotkey reference.

@@ -72,3 +72,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   hand-drawn play/stop and repeat toggle (now lives in vgplay, see 0014)
 - [0014](0014-split-sound-into-separate-vgplay-project.md) — Split sound playback
   into a separate vgplay project (supersedes 0009)
+- [0015](0015-drop-image-opens-in-the-same-window.md) — A dropped image opens in
+  the same window

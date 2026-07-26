@@ -1513,6 +1513,15 @@ fn main() {
             },
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::DroppedFile(path) => {
+                    // An image dropped on the window opens here, as a double-click would.
+                    // Anything else (unsupported file, folder) is ignored, so the frame on
+                    // screen stays. Routed through Open so the sibling list, folder watcher,
+                    // and caches are swapped exactly like a file handed over by IPC.
+                    if is_image(&path) {
+                        let _ = proxy.send_event(UserEvent::Open(path));
+                    }
+                }
                 WindowEvent::Moved(pos) => {
                     if !fullscreen {
                         win_geom.0 = pos.x;
