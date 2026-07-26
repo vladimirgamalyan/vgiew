@@ -4,11 +4,16 @@
 // Neighboring images are prefetched so browsing is instant.
 #![windows_subsystem = "windows"]
 
+#[cfg(feature = "svg")]
+mod svg;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(feature = "svg")]
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -29,7 +34,12 @@ const MIN_SCALE: f32 = 0.01;
 // the line reads clearly without covering much of the pixel.
 const GRID_MIN_SCALE: f32 = 8.0;
 
+#[cfg(not(feature = "svg"))]
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp"];
+#[cfg(feature = "svg")]
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "webp", "svg", "svgz",
+];
 #[cfg(windows)]
 const REUSE_RUNNING_WINDOW_ON_FILE_OPEN: bool = false;
 
@@ -39,9 +49,97 @@ struct DecodedImage {
     px: Vec<u32>, // 0xAARRGGBB
 }
 
+// What the viewer can show. A raster is its own pixels; a vector document keeps its parsed
+// tree and is rasterized on demand for the current viewport (ADR 0016).
+enum Frame {
+    Raster(DecodedImage),
+    #[cfg(feature = "svg")]
+    Vector(VectorFrame),
+}
+
+impl Frame {
+    // The image's own size in pixels — what the title reports, and what fit and clamping
+    // work in. For a vector this is the document size, not the size of any rasterization.
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Frame::Raster(im) => (im.w, im.h),
+            #[cfg(feature = "svg")]
+            Frame::Vector(v) => (v.doc.w, v.doc.h),
+        }
+    }
+
+    // Whether the file states the pixel size it wants to be seen at. Rasters always do; an
+    // SVG with `width="100%"` does not, and ADR 0017 fits those to the window instead of
+    // capping them at 1:1.
+    fn has_natural_size(&self) -> bool {
+        match self {
+            Frame::Raster(_) => true,
+            #[cfg(feature = "svg")]
+            Frame::Vector(v) => v.doc.declared,
+        }
+    }
+}
+
+// A view of an image: the window it fills and where in the image it is centred. Compared for
+// exact equality to decide whether a rasterization is still current, so any change at all
+// invalidates it.
+#[cfg(feature = "svg")]
+#[derive(Clone, Copy, PartialEq)]
+struct View {
+    ww: u32,
+    wh: u32,
+    scale: f32,
+    cx: f32,
+    cy: f32,
+}
+
+// One rasterization of a vector document, together with the view that produced it.
+#[cfg(feature = "svg")]
+struct Rendered {
+    img: DecodedImage, // w/h are the viewport's size, not the document's
+    view: View,
+}
+
+#[cfg(feature = "svg")]
+struct VectorFrame {
+    // Shared so a worker thread can rasterize while the event loop keeps serving frames.
+    doc: Arc<svg::Doc>,
+    // The newest finished rasterization. Blitted when it matches the current view, and
+    // resampled as a placeholder while a fresh one is on its way.
+    last: Option<Rendered>,
+    // The view a worker is currently rasterizing, if any. Serves as the request's identity:
+    // a result whose view no longer matches belongs to a view the user has already left.
+    asked: Option<View>,
+}
+
+// A rasterization request, from the event loop to a worker thread and back.
+#[cfg(feature = "svg")]
+struct RasterJob {
+    idx: usize,
+    path: PathBuf,
+    view: View,
+}
+
+// What a file should be shown at once decoded. The scale is known in advance only when a
+// zoom is being carried across a browse (ADR 0008); on open it depends on the file's own
+// size, so the decoding thread computes it. Only the vector path reads these — a raster
+// decode ignores them.
+#[cfg_attr(not(feature = "svg"), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct DecodeView {
+    ww: u32,
+    wh: u32,
+    scale: Option<f32>,
+    cx: f32,
+    cy: f32,
+}
+
 enum UserEvent {
-    Decoded { path: PathBuf, idx: usize, img: DecodedImage },
+    Decoded { path: PathBuf, idx: usize, img: Frame },
     Failed { path: PathBuf, idx: usize },
+    // A worker finished rasterizing a vector document for one view; None if it could not.
+    #[cfg(feature = "svg")]
+    Rasterized { job: RasterJob, px: Option<Vec<u32>> },
     // Optional reuse mode: another process handed this window a file to open.
     Open(PathBuf),
     // The watched folder changed on disk (debounced); rebuild the sibling list.
@@ -173,18 +271,65 @@ fn load_app_icon() -> Option<Icon> {
     Icon::from_rgba(rgba.into_raw(), w, h).ok()
 }
 
-fn spawn_decode(path: PathBuf, idx: usize, proxy: EventLoopProxy<UserEvent>) {
-    std::thread::spawn(move || match load_rgba(&path) {
-        Some(rgba) => {
-            let _ = proxy.send_event(UserEvent::Decoded {
-                path,
-                idx,
-                img: pack_rgba(&rgba),
-            });
+// Loads whatever `path` holds. The raster decoders run first and unchanged, so the common
+// case keeps exactly the I/O it always had; only a file they all reject is then offered to
+// the SVG parser, which costs one rejected header probe for a vector and nothing otherwise.
+//
+// A vector is rasterized here too, not just parsed: parsing is the cheap half (0.1 ms for an
+// icon) while rasterizing is what costs, so handing back an unrasterized tree would leave the
+// window empty for exactly as long as the work it was meant to do in advance (ADR 0016).
+fn load_frame(path: &Path, view: DecodeView) -> Option<Frame> {
+    if let Some(rgba) = load_rgba(path) {
+        return Some(Frame::Raster(pack_rgba(&rgba)));
+    }
+    #[cfg(feature = "svg")]
+    {
+        let doc = svg::open(path)?;
+        let scale = view
+            .scale
+            .unwrap_or_else(|| open_scale(doc.w, doc.h, view.ww, view.wh, doc.declared));
+        // A carried zoom brings its own centre; on open the document is centred.
+        let (cx, cy) = match view.scale {
+            Some(_) => (view.cx, view.cy),
+            None => (doc.w as f32 / 2.0, doc.h as f32 / 2.0),
+        };
+        let v = View { ww: view.ww, wh: view.wh, scale, cx, cy };
+        let last = doc.rasterize(v.ww, v.wh, v.scale, v.cx, v.cy).map(|px| Rendered {
+            img: DecodedImage { w: v.ww, h: v.wh, px },
+            view: v,
+        });
+        return Some(Frame::Vector(VectorFrame {
+            doc: Arc::new(doc),
+            last,
+            asked: None,
+        }));
+    }
+    #[cfg(not(feature = "svg"))]
+    {
+        let _ = view;
+        None
+    }
+}
+
+fn spawn_decode(path: PathBuf, idx: usize, view: DecodeView, proxy: EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || match load_frame(&path, view) {
+        Some(img) => {
+            let _ = proxy.send_event(UserEvent::Decoded { path, idx, img });
         }
         None => {
             let _ = proxy.send_event(UserEvent::Failed { path, idx });
         }
+    });
+}
+
+// Rasterizes one view of an already-parsed document on a worker thread. The result is always
+// reported, success or not, so the event loop can release the single rasterization slot.
+#[cfg(feature = "svg")]
+fn spawn_raster(doc: Arc<svg::Doc>, job: RasterJob, proxy: EventLoopProxy<UserEvent>) {
+    std::thread::spawn(move || {
+        let v = job.view;
+        let px = doc.rasterize(v.ww, v.wh, v.scale, v.cx, v.cy);
+        let _ = proxy.send_event(UserEvent::Rasterized { job, px });
     });
 }
 
@@ -200,9 +345,10 @@ fn neighbors(current: usize, len: usize) -> (usize, usize) {
 fn ensure_decode(
     idx: usize,
     files: &[PathBuf],
-    cache: &HashMap<usize, DecodedImage>,
+    cache: &HashMap<usize, Frame>,
     inflight: &mut HashSet<usize>,
     failed: &HashSet<usize>,
+    view: DecodeView,
     proxy: &EventLoopProxy<UserEvent>,
 ) {
     if idx >= files.len()
@@ -213,25 +359,78 @@ fn ensure_decode(
         return;
     }
     inflight.insert(idx);
-    spawn_decode(files[idx].clone(), idx, proxy.clone());
+    spawn_decode(files[idx].clone(), idx, view, proxy.clone());
 }
 
 // Prefetch the neighbors of the current image so browsing is instant.
 fn prefetch(
     current: usize,
     files: &[PathBuf],
-    cache: &HashMap<usize, DecodedImage>,
+    cache: &HashMap<usize, Frame>,
     inflight: &mut HashSet<usize>,
     failed: &HashSet<usize>,
+    view: DecodeView,
     proxy: &EventLoopProxy<UserEvent>,
 ) {
     let (prev, next) = neighbors(current, files.len());
-    ensure_decode(next, files, cache, inflight, failed, proxy);
-    ensure_decode(prev, files, cache, inflight, failed, proxy);
+    ensure_decode(next, files, cache, inflight, failed, view, proxy);
+    ensure_decode(prev, files, cache, inflight, failed, view, proxy);
+}
+
+// The view a queued decode should aim for: the zoom being carried across a browse, or "fit on
+// open" when the next image is to be re-fitted (ADR 0008). Passed down so a vector document
+// can be rasterized on the decoding thread and be ready the moment it lands.
+fn decode_view(
+    window: &winit::window::Window,
+    fit_mode: bool,
+    scale: f32,
+    cx: f32,
+    cy: f32,
+) -> DecodeView {
+    let size = window.inner_size();
+    DecodeView {
+        ww: size.width.max(1),
+        wh: size.height.max(1),
+        scale: (!fit_mode).then_some(scale),
+        cx,
+        cy,
+    }
+}
+
+// Makes sure the document at `idx` has a rasterization for `view`, asking a worker for one if
+// it does not. Called before every present, which is enough because every view change already
+// requests a redraw.
+#[cfg(feature = "svg")]
+fn ensure_raster(
+    idx: usize,
+    view: View,
+    cache: &mut HashMap<usize, Frame>,
+    files: &[PathBuf],
+    busy: &mut bool,
+    queued: &mut Option<(usize, View)>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    let Some(path) = files.get(idx).cloned() else {
+        return;
+    };
+    let Some(Frame::Vector(v)) = cache.get_mut(&idx) else {
+        return;
+    };
+    // Already showing this view, or already rendering it.
+    if v.last.as_ref().is_some_and(|r| r.view == view) || v.asked == Some(view) {
+        return;
+    }
+    v.asked = Some(view);
+    if *busy {
+        *queued = Some((idx, view));
+        return;
+    }
+    *busy = true;
+    spawn_raster(v.doc.clone(), RasterJob { idx, path, view }, proxy.clone());
 }
 
 // Keep only {prev, current, next} in the cache to bound memory (big images are ~w*h*4 bytes).
-fn evict(cache: &mut HashMap<usize, DecodedImage>, current: usize, len: usize) {
+fn evict(cache: &mut HashMap<usize, Frame>, current: usize, len: usize) {
     let (prev, next) = neighbors(current, len);
     cache.retain(|&k, _| k == current || k == prev || k == next);
 }
@@ -274,17 +473,7 @@ fn sample_nearest(img: &DecodedImage, sx: f32, sy: f32, br: f32, bg: f32, bb: f3
     if sx < 0.0 || sy < 0.0 || sx >= img.w as f32 || sy >= img.h as f32 {
         return BG;
     }
-    let p = img.px[sy as usize * img.w as usize + sx as usize];
-    let a = ((p >> 24) & 0xFF) as f32 / 255.0;
-    composite(
-        ((p >> 16) & 0xFF) as f32,
-        ((p >> 8) & 0xFF) as f32,
-        (p & 0xFF) as f32,
-        a,
-        br,
-        bg,
-        bb,
-    )
+    composite_px(img.px[sy as usize * img.w as usize + sx as usize], br, bg, bb)
 }
 
 // Bilinear filtering: smoothing when zooming out (scale < 1), no aliasing.
@@ -317,56 +506,154 @@ fn sample(img: &DecodedImage, sx: f32, sy: f32, br: f32, bg: f32, bb: f32) -> u3
     composite(r, g, b, a, br, bg, bb)
 }
 
-fn draw(img: Option<&DecodedImage>, buf: &mut [u32], ww: u32, wh: u32, scale: f32, cx: f32, cy: f32) {
-    match img {
+fn draw(frame: Option<&Frame>, buf: &mut [u32], ww: u32, wh: u32, scale: f32, cx: f32, cy: f32) {
+    match frame {
         None => buf.iter_mut().for_each(|p| *p = BG),
-        Some(im) => {
-            let ww_f = ww as f32;
-            let wh_f = wh as f32;
-            // Zoom in (scale >= 1) — nearest (crisp pixels); zoom out — bilinear.
-            let nearest = scale >= 1.0;
-            // Pixel grid: at high zoom mark the left/top edge of each image pixel. A screen
-            // pixel is a grid line when it maps to a different image pixel than its left/upper
-            // neighbor. `col_edge` is row-independent, so precompute it once for all rows.
-            let grid = nearest && scale >= GRID_MIN_SCALE;
-            let col_edge: Vec<bool> = if grid {
-                let sx_floor = |dx: f32| (cx + (dx - ww_f / 2.0) / scale).floor();
-                (0..ww as usize)
-                    .map(|dx| sx_floor(dx as f32) != sx_floor(dx as f32 - 1.0))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            buf.par_chunks_mut(ww as usize)
-                .enumerate()
-                .for_each(|(dy, row)| {
-                    let sy = cy + (dy as f32 - wh_f / 2.0) / scale;
-                    let row_edge =
-                        grid && sy.floor() != (cy + (dy as f32 - 1.0 - wh_f / 2.0) / scale).floor();
-                    for (dx, px) in row.iter_mut().enumerate() {
-                        let sx = cx + (dx as f32 - ww_f / 2.0) / scale;
-                        let (br, bg, bb) = checker(dx, dy);
-                        let mut c = if nearest {
-                            sample_nearest(im, sx, sy, br, bg, bb)
-                        } else {
-                            sample(im, sx, sy, br, bg, bb)
-                        };
-                        // Draw the grid line only over the image itself, not the surrounding
-                        // background (matches sample_nearest's in-bounds region).
-                        if grid
-                            && (row_edge || col_edge[dx])
-                            && sx >= 0.0
-                            && sy >= 0.0
-                            && sx < im.w as f32
-                            && sy < im.h as f32
-                        {
-                            c = grid_tint(c);
-                        }
-                        *px = c;
-                    }
-                });
-        }
+        Some(Frame::Raster(im)) => draw_raster(im, buf, ww, wh, scale, cx, cy),
+        #[cfg(feature = "svg")]
+        Some(Frame::Vector(v)) => draw_vector(v, buf, ww, wh, scale, cx, cy),
     }
+}
+
+fn draw_raster(
+    im: &DecodedImage,
+    buf: &mut [u32],
+    ww: u32,
+    wh: u32,
+    scale: f32,
+    cx: f32,
+    cy: f32,
+) {
+    let ww_f = ww as f32;
+    let wh_f = wh as f32;
+    // Zoom in (scale >= 1) — nearest (crisp pixels); zoom out — bilinear.
+    let nearest = scale >= 1.0;
+    // Pixel grid: at high zoom mark the left/top edge of each image pixel. A screen
+    // pixel is a grid line when it maps to a different image pixel than its left/upper
+    // neighbor. `col_edge` is row-independent, so precompute it once for all rows.
+    let grid = nearest && scale >= GRID_MIN_SCALE;
+    let col_edge: Vec<bool> = if grid {
+        let sx_floor = |dx: f32| (cx + (dx - ww_f / 2.0) / scale).floor();
+        (0..ww as usize)
+            .map(|dx| sx_floor(dx as f32) != sx_floor(dx as f32 - 1.0))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    buf.par_chunks_mut(ww as usize)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let sy = cy + (dy as f32 - wh_f / 2.0) / scale;
+            let row_edge =
+                grid && sy.floor() != (cy + (dy as f32 - 1.0 - wh_f / 2.0) / scale).floor();
+            for (dx, px) in row.iter_mut().enumerate() {
+                let sx = cx + (dx as f32 - ww_f / 2.0) / scale;
+                let (br, bg, bb) = checker(dx, dy);
+                let mut c = if nearest {
+                    sample_nearest(im, sx, sy, br, bg, bb)
+                } else {
+                    sample(im, sx, sy, br, bg, bb)
+                };
+                // Draw the grid line only over the image itself, not the surrounding
+                // background (matches sample_nearest's in-bounds region).
+                if grid
+                    && (row_edge || col_edge[dx])
+                    && sx >= 0.0
+                    && sy >= 0.0
+                    && sx < im.w as f32
+                    && sy < im.h as f32
+                {
+                    c = grid_tint(c);
+                }
+                *px = c;
+            }
+        });
+}
+
+// A vector document is drawn from its newest rasterization. When that was produced for
+// exactly this view it is composited 1:1; otherwise it is resampled as a placeholder, so a
+// zoom stays responsive while a fresh rasterization is computed in the background (ADR 0016).
+//
+// Neither nearest-neighbour nor the pixel grid appears here, on purpose: both are defined in
+// terms of image pixels, and a re-rasterized vector has none — only whatever resolution the
+// current zoom happened to produce, whose edges mean nothing to the viewer.
+#[cfg(feature = "svg")]
+fn draw_vector(
+    v: &VectorFrame,
+    buf: &mut [u32],
+    ww: u32,
+    wh: u32,
+    scale: f32,
+    cx: f32,
+    cy: f32,
+) {
+    let Some(r) = &v.last else {
+        buf.iter_mut().for_each(|p| *p = BG);
+        return;
+    };
+
+    if r.view == (View { ww, wh, scale, cx, cy }) {
+        // 1:1, but still composited: the rasterization carries alpha, and SVGs are usually
+        // transparent, so the checkerboard has to show through.
+        buf.par_chunks_mut(ww as usize)
+            .enumerate()
+            .for_each(|(dy, row)| {
+                for (dx, px) in row.iter_mut().enumerate() {
+                    let (br, bg, bb) = checker(dx, dy);
+                    *px = composite_px(r.img.px[dy * ww as usize + dx], br, bg, bb);
+                }
+            });
+        return;
+    }
+
+    let (rel, base_x, base_y) =
+        placeholder_map(View { ww, wh, scale, cx, cy }, r.view, r.img.w, r.img.h);
+    let ww_f = ww as f32;
+    let wh_f = wh as f32;
+    buf.par_chunks_mut(ww as usize)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let sy = base_y + (dy as f32 - wh_f / 2.0) * rel;
+            for (dx, px) in row.iter_mut().enumerate() {
+                let sx = base_x + (dx as f32 - ww_f / 2.0) * rel;
+                let (br, bg, bb) = checker(dx, dy);
+                *px = sample(&r.img, sx, sy, br, bg, bb);
+            }
+        });
+}
+
+// Maps the current view's screen pixels onto the pixels of a rasterization made for a
+// different view. A document point sits in that rasterization at
+// (point - was.cx) * was.scale + w/2; substituting the current view's screen-to-document
+// mapping collapses to a plain affine step, so screen (dx, dy) reads placeholder
+// (base_x + (dx - ww/2) * rel, base_y + (dy - wh/2) * rel) — exactly the shape the raster
+// path samples with, which is why `sample` serves both and no second sampler exists.
+//
+// Returns (rel, base_x, base_y): placeholder pixels per screen pixel, and where the window's
+// centre lands in the placeholder.
+#[cfg(feature = "svg")]
+fn placeholder_map(now: View, was: View, raster_w: u32, raster_h: u32) -> (f32, f32, f32) {
+    (
+        was.scale / now.scale,
+        (now.cx - was.cx) * was.scale + raster_w as f32 / 2.0,
+        (now.cy - was.cy) * was.scale + raster_h as f32 / 2.0,
+    )
+}
+
+// Unpacks one 0xAARRGGBB pixel and composites it over a background color. Shared by
+// `sample_nearest` and the 1:1 vector blit, which differ only in where the pixel came from.
+#[inline(always)]
+fn composite_px(p: u32, br: f32, bg: f32, bb: f32) -> u32 {
+    let a = ((p >> 24) & 0xFF) as f32 / 255.0;
+    composite(
+        ((p >> 16) & 0xFF) as f32,
+        ((p >> 8) & 0xFF) as f32,
+        (p & 0xFF) as f32,
+        a,
+        br,
+        bg,
+        bb,
+    )
 }
 
 fn fit_scale(iw: u32, ih: u32, ww: u32, wh: u32) -> f32 {
@@ -377,6 +664,18 @@ fn fit_scale(iw: u32, ih: u32, ww: u32, wh: u32) -> f32 {
 // small image past 100%. This is the on-open / reset scale and the zoom-out floor.
 fn view_fit(iw: u32, ih: u32, ww: u32, wh: u32) -> f32 {
     fit_scale(iw, ih, ww, wh).min(1.0)
+}
+
+// The scale a file opens at. Shrink-to-fit for anything that states its own pixel size
+// (ADR 0004) — but the never-enlarge half of that rule exists to avoid blurring a raster,
+// and a document with no natural size has nothing to blur and no meaningful 100%, so it is
+// simply fitted to the window (ADR 0017).
+fn open_scale(iw: u32, ih: u32, ww: u32, wh: u32, natural: bool) -> f32 {
+    if natural {
+        view_fit(iw, ih, ww, wh)
+    } else {
+        fit_scale(iw, ih, ww, wh)
+    }
 }
 
 // Keep the view within bounds after a zoom or pan. `cx`/`cy` is the image point at
@@ -1132,16 +1431,18 @@ fn dump(args: &[String]) {
     let out = &args[3];
     let ww: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1280);
     let wh: u32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(800);
+    // The optional W H is the window this frame is rendered for, which for a vector document
+    // is also the size it gets rasterized at — so the same contract covers both kinds.
+    let view = DecodeView { ww, wh, scale: None, cx: 0.0, cy: 0.0 };
     let t_dec = std::time::Instant::now();
-    let rgba = load_rgba(Path::new(src)).expect("decode");
+    let frame = load_frame(Path::new(src), view).expect("decode");
     let dec_ms = t_dec.elapsed().as_secs_f64() * 1000.0;
-    let (w, h) = rgba.dimensions();
-    let t_pack = std::time::Instant::now();
-    let img = pack_rgba(&rgba);
-    let pack_ms = t_pack.elapsed().as_secs_f64() * 1000.0;
-    let scale = fit_scale(w, h, ww, wh);
+    let (w, h) = frame.size();
+    let scale = open_scale(w, h, ww, wh, frame.has_natural_size());
     let mut buf = vec![0u32; (ww as usize) * (wh as usize)];
-    draw(Some(&img), &mut buf, ww, wh, scale, w as f32 / 2.0, h as f32 / 2.0);
+    let t_draw = std::time::Instant::now();
+    draw(Some(&frame), &mut buf, ww, wh, scale, w as f32 / 2.0, h as f32 / 2.0);
+    let draw_ms = t_draw.elapsed().as_secs_f64() * 1000.0;
     let mut out_img = image::RgbImage::new(ww, wh);
     for (i, p) in buf.iter().enumerate() {
         let x = (i as u32) % ww;
@@ -1153,7 +1454,69 @@ fn dump(args: &[String]) {
         );
     }
     out_img.save(out).expect("save");
-    println!("{w}x{h}: decode {dec_ms:.1} ms + pack {pack_ms:.1} ms  (-> {ww}x{wh}, fit {scale:.4})");
+    println!("{w}x{h}: load {dec_ms:.1} ms + draw {draw_ms:.1} ms  (-> {ww}x{wh}, fit {scale:.4})");
+}
+
+#[cfg(all(test, feature = "svg"))]
+mod tests {
+    use super::*;
+
+    // Where a document coordinate lands along one axis — the definition both the renderer and
+    // the rasterizer work from, so it is what the mapping has to agree with.
+    fn on_axis(center: f32, scale: f32, extent: u32, doc: f32) -> f32 {
+        (doc - center) * scale + extent as f32 / 2.0
+    }
+
+    // The property that matters: whatever the placeholder is stretched by, a screen pixel must
+    // read the placeholder pixel that actually shows the document point drawn there. A sign or
+    // term slipped in the mapping breaks this even though the picture still looks plausible.
+    #[test]
+    fn placeholder_lookup_lands_on_the_pixel_showing_that_point() {
+        let was = View { ww: 800, wh: 600, scale: 2.0, cx: 100.0, cy: 50.0 };
+        // Zoomed in, panned, and resized between the two views, so every term is in play.
+        let now = View { ww: 1024, wh: 768, scale: 7.5, cx: 130.0, cy: 61.0 };
+        let (rel, base_x, base_y) = placeholder_map(now, was, was.ww, was.wh);
+
+        for doc in [100.0f32, 118.5, 130.0, 141.25] {
+            let screen = on_axis(now.cx, now.scale, now.ww, doc);
+            let read = base_x + (screen - now.ww as f32 / 2.0) * rel;
+            let holds = on_axis(was.cx, was.scale, was.ww, doc);
+            assert!(
+                (read - holds).abs() < 1e-3,
+                "x: doc {doc} drawn at screen {screen} reads placeholder {read}, but the point \
+                 sits at {holds}"
+            );
+        }
+        for doc in [40.0f32, 61.0, 77.5] {
+            let screen = on_axis(now.cy, now.scale, now.wh, doc);
+            let read = base_y + (screen - now.wh as f32 / 2.0) * rel;
+            let holds = on_axis(was.cy, was.scale, was.wh, doc);
+            assert!(
+                (read - holds).abs() < 1e-3,
+                "y: doc {doc} drawn at screen {screen} reads placeholder {read}, but the point \
+                 sits at {holds}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unchanged_view_maps_one_to_one() {
+        let v = View { ww: 640, wh: 480, scale: 1.5, cx: 12.0, cy: 34.0 };
+        let (rel, bx, by) = placeholder_map(v, v, v.ww, v.wh);
+        assert_eq!(rel, 1.0);
+        assert_eq!((bx, by), (320.0, 240.0));
+    }
+
+    #[test]
+    fn open_scale_caps_a_declared_size_but_fits_one_without() {
+        // A small icon that states its size stays at 1:1 rather than being blown up...
+        assert_eq!(open_scale(24, 24, 1600, 1000, true), 1.0);
+        // ...while the same geometry with no declared size is fitted to the window.
+        assert_eq!(open_scale(300, 150, 1600, 1000, false), 1600.0 / 300.0);
+        // Larger than the window: both shrink to fit, identically.
+        assert_eq!(open_scale(4000, 4000, 1600, 1000, true), 0.25);
+        assert_eq!(open_scale(4000, 4000, 1600, 1000, false), 0.25);
+    }
 }
 
 fn main() {
@@ -1293,9 +1656,18 @@ fn main() {
     }
 
     // Decoded-image cache with neighbor prefetch; bounded to {prev, current, next}.
-    let mut cache: HashMap<usize, DecodedImage> = HashMap::new();
+    let mut cache: HashMap<usize, Frame> = HashMap::new();
     let mut inflight: HashSet<usize> = HashSet::new();
     let mut failed: HashSet<usize> = HashSet::new();
+
+    // Rasterization of vector documents runs one job at a time, and a request made while a
+    // worker is busy replaces whatever was queued. resvg offers no way to abort a render in
+    // progress, so this is what keeps a wheel gesture from piling up work for views the user
+    // has already left (ADR 0016).
+    #[cfg(feature = "svg")]
+    let mut raster_busy = false;
+    #[cfg(feature = "svg")]
+    let mut raster_queued: Option<(usize, View)> = None;
 
     // View state.
     let mut scale = 1.0f32;
@@ -1319,11 +1691,12 @@ fn main() {
     };
 
     if !files.is_empty() {
-        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+        let v = decode_view(&window, fit_mode, scale, cx, cy);
+        ensure_decode(current, &files, &cache, &mut inflight, &failed, v, &proxy);
     }
 
     let update_title = |window: &winit::window::Window,
-                        img: Option<&DecodedImage>,
+                        img: Option<&Frame>,
                         scale: f32,
                         files: &[PathBuf],
                         current: usize| {
@@ -1340,27 +1713,29 @@ fn main() {
             .map(|m| format!("  {}", format_size(m.len())))
             .unwrap_or_default();
         match img {
-            Some(im) => window.set_title(&format!(
-                "vgiew — {name}  [{}×{}]{size}  {:.0}%",
-                im.w,
-                im.h,
-                scale * 100.0
-            )),
+            Some(f) => {
+                let (iw, ih) = f.size();
+                window.set_title(&format!(
+                    "vgiew — {name}  [{iw}×{ih}]{size}  {:.0}%",
+                    scale * 100.0
+                ))
+            }
             None => window.set_title(&format!("vgiew — {name}{size}  (loading…)")),
         }
     };
     update_title(&window, None, scale, &files, current);
 
-    let apply_fit = |img: Option<&DecodedImage>,
+    let apply_fit = |img: Option<&Frame>,
                      ww: u32,
                      wh: u32,
                      scale: &mut f32,
                      cx: &mut f32,
                      cy: &mut f32| {
-        if let Some(im) = img {
-            *scale = view_fit(im.w, im.h, ww, wh);
-            *cx = im.w as f32 / 2.0;
-            *cy = im.h as f32 / 2.0;
+        if let Some(f) = img {
+            let (iw, ih) = f.size();
+            *scale = open_scale(iw, ih, ww, wh, f.has_natural_size());
+            *cx = iw as f32 / 2.0;
+            *cy = ih as f32 / 2.0;
         }
     };
 
@@ -1404,16 +1779,62 @@ fn main() {
                         // browse-miss decode lands while zoomed, carry the literal scale.
                         if fit_mode {
                             apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
-                        } else if let Some(im) = cache.get(&current) {
+                        } else if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
                             // Carry zoom and pan: keep cx/cy, clamp to the new image.
-                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                            clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                         }
                         update_title(&window, cache.get(&current), scale, &files, current);
                         window.request_redraw();
                         // Current is on screen — now prefetch its neighbors.
-                        prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
+                        let v = decode_view(&window, fit_mode, scale, cx, cy);
+                        prefetch(current, &files, &cache, &mut inflight, &failed, v, &proxy);
                     }
                     evict(&mut cache, current, files.len());
+                }
+                #[cfg(feature = "svg")]
+                UserEvent::Rasterized { job, px } => {
+                    raster_busy = false;
+                    // Keep the result only if the folder has not been swapped under us and the
+                    // view it was rendered for is still the one being waited on.
+                    if files.get(job.idx) == Some(&job.path) {
+                        if let Some(Frame::Vector(v)) = cache.get_mut(&job.idx) {
+                            if v.asked == Some(job.view) {
+                                match px {
+                                    Some(px) => {
+                                        v.asked = None;
+                                        v.last = Some(Rendered {
+                                            img: DecodedImage {
+                                                w: job.view.ww,
+                                                h: job.view.wh,
+                                                px,
+                                            },
+                                            view: job.view,
+                                        });
+                                        if job.idx == current {
+                                            window.request_redraw();
+                                        }
+                                    }
+                                    // Leave `asked` on the view that could not be rendered, so
+                                    // the same impossible job is not re-requested by every
+                                    // redraw. Any later view change replaces it.
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
+                    // Take up whatever was asked for while the worker was busy.
+                    if let Some((idx, view)) = raster_queued.take() {
+                        if let (Some(path), Some(Frame::Vector(v))) =
+                            (files.get(idx).cloned(), cache.get(&idx))
+                        {
+                            raster_busy = true;
+                            spawn_raster(
+                                v.doc.clone(),
+                                RasterJob { idx, path, view },
+                                proxy.clone(),
+                            );
+                        }
+                    }
                 }
                 UserEvent::Failed { path, idx } => {
                     if files.get(idx) != Some(&path) {
@@ -1457,8 +1878,8 @@ fn main() {
                         .unwrap_or_else(|| current.min(new_files.len().saturating_sub(1)));
                     files = new_files;
                     if !files.is_empty() {
-                        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
-                        prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
+                        ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
+                        prefetch(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                         evict(&mut cache, current, files.len());
                     }
                     // If the file on screen survived, the frame is unchanged. If it left the
@@ -1471,8 +1892,8 @@ fn main() {
                         let size = window.inner_size();
                         if fit_mode {
                             apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
-                        } else if let Some(im) = cache.get(&current) {
-                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                        } else if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
+                            clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                         }
                         window.request_redraw();
                     }
@@ -1502,7 +1923,7 @@ fn main() {
                     failed.clear();
                     fit_mode = true;
                     if !files.is_empty() {
-                        ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+                        ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                     }
                     update_title(&window, None, scale, &files, current);
                     // Bring this window to the front for the user who just opened the file.
@@ -1536,8 +1957,8 @@ fn main() {
                     }
                     if fit_mode {
                         apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
-                    } else if let Some(im) = cache.get(&current) {
-                        clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                    } else if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
+                        clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                     }
                     window.request_redraw();
                 }
@@ -1546,9 +1967,9 @@ fn main() {
                     if dragging {
                         cx -= (new.0 - mouse.0) / scale;
                         cy -= (new.1 - mouse.1) / scale;
-                        if let Some(im) = cache.get(&current) {
+                        if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
                             let size = window.inner_size();
-                            clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                            clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                         }
                         fit_mode = false;
                         window.request_redraw();
@@ -1566,7 +1987,7 @@ fn main() {
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                     };
                     if dy != 0.0 {
-                        if let Some((iw, ih)) = cache.get(&current).map(|im| (im.w, im.h)) {
+                        if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
                             let size = window.inner_size();
                             let (ww, wh) = (size.width as f32, size.height as f32);
                             // Source point under the cursor before zoom.
@@ -1600,7 +2021,26 @@ fn main() {
                         && key.physical_key == PhysicalKey::Code(KeyCode::KeyC)
                     {
                         if let Some(path) = files.get(current).cloned() {
-                            copy_to_clipboard(&window, &path, cache.get(&current));
+                            // A vector document keeps no pixels of its own, so it is
+                            // rasterized here at the document size — the number the title
+                            // reports — rather than at the current zoom, so a paste does not
+                            // depend on how the wheel happened to be turned (ADR 0017).
+                            #[cfg(feature = "svg")]
+                            let owned;
+                            let img = match cache.get(&current) {
+                                Some(Frame::Raster(im)) => Some(im),
+                                #[cfg(feature = "svg")]
+                                Some(Frame::Vector(v)) => {
+                                    owned = v.doc.rasterize_document().map(|px| DecodedImage {
+                                        w: v.doc.w,
+                                        h: v.doc.h,
+                                        px,
+                                    });
+                                    owned.as_ref()
+                                }
+                                None => None,
+                            };
+                            copy_to_clipboard(&window, &path, img);
                         }
                         return;
                     }
@@ -1622,18 +2062,18 @@ fn main() {
                                     // (recenter + clamp), keeping the literal scale.
                                     if fit_mode {
                                         apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
-                                    } else if let Some(im) = cache.get(&current) {
+                                    } else if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
                                         // Carry zoom and pan: keep cx/cy, clamp to the new image.
-                                        clamp_center(&mut cx, &mut cy, scale, im.w, im.h, size.width as f32, size.height as f32);
+                                        clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                                     }
                                     update_title(&window, cache.get(&current), scale, &files, current);
                                     window.request_redraw();
                                 } else {
                                     // Miss — kick off decode; keep the previous frame on screen until it arrives.
-                                    ensure_decode(current, &files, &cache, &mut inflight, &failed, &proxy);
+                                    ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                                     update_title(&window, None, scale, &files, current);
                                 }
-                                prefetch(current, &files, &cache, &mut inflight, &failed, &proxy);
+                                prefetch(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                                 evict(&mut cache, current, files.len());
                             }
                         }
@@ -1678,7 +2118,7 @@ fn main() {
                             window.request_redraw();
                         }
                         Key::Character("1") => {
-                            if let Some((iw, ih)) = cache.get(&current).map(|im| (im.w, im.h)) {
+                            if let Some((iw, ih)) = cache.get(&current).map(|f| f.size()) {
                                 scale = 1.0;
                                 cx = iw as f32 / 2.0;
                                 cy = ih as f32 / 2.0;
@@ -1694,6 +2134,20 @@ fn main() {
                 WindowEvent::RedrawRequested => {
                     let size = window.inner_size();
                     let (w, h) = (size.width.max(1), size.height.max(1));
+                    // Every view change already asks for a redraw, so this one place is
+                    // enough to keep a vector document's rasterization in step with the view.
+                    // The frame is drawn from whatever is ready now — a resampled placeholder
+                    // if the fresh rasterization has not landed yet.
+                    #[cfg(feature = "svg")]
+                    ensure_raster(
+                        current,
+                        View { ww: w, wh: h, scale, cx, cy },
+                        &mut cache,
+                        &files,
+                        &mut raster_busy,
+                        &mut raster_queued,
+                        &proxy,
+                    );
                     surface
                         .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
                         .unwrap();

@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["tier_a_eframe", "tier_b_pixels", "tier_c_softbuffer", "interactive_cpu", "gpu_tuned"]
+members = [
+    "tier_a_eframe",
+    "tier_b_pixels",
+    "tier_c_softbuffer",
+    "interactive_cpu",
+    "gpu_tuned",
+    "svg_start_baseline",
+    "svg_start_resvg",
+    "svg_start_trim",
+]
 
 # Profile close to the utility's target release — we measure what will ship.
 [profile.release]

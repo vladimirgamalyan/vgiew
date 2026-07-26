@@ -74,3 +74,7 @@ Before proposing or re-proposing a decision that feels debatable, check
   into a separate vgplay project (supersedes 0009)
 - [0015](0015-drop-image-opens-in-the-same-window.md) — A dropped image opens in
   the same window
+- [0016](0016-svg-via-resvg-rasterize-the-viewport.md) — SVG via resvg, rasterizing
+  the viewport rather than the image
+- [0017](0017-view-semantics-for-a-format-without-a-natural-size.md) — Open scale,
+  `[W×H]` and `Ctrl+C` for a format with no natural pixel size

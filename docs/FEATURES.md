@@ -10,9 +10,11 @@ switching**: everything below is built so that opening and browsing images stays
 - **Fit to window** with letterboxing over a neutral dark background.
 - **Transparency** is composited over that background.
 - **Crisp zoom:** nearest-neighbor when zooming in (sharp pixel edges), bilinear when
-  zooming out (no aliasing).
+  zooming out (no aliasing). A vector document is instead re-rendered for the current zoom,
+  so it has no pixels to sharpen — see [SVG](#svg).
 - **Pixel grid at high zoom:** past a threshold zoom, a 1px grid marks the boundary between
-  image pixels. The line tint adapts to the underlying color so it stays visible.
+  image pixels. The line tint adapts to the underlying color so it stays visible. Not drawn
+  for vector documents, which have no image pixels.
 - **Informative title:** `vgiew — name [W×H] size zoom%`, and `(loading…)` while a frame
   is still decoding.
 
@@ -77,8 +79,33 @@ Details:
 
 ## Supported formats
 
-JPG, PNG, GIF (first frame), BMP, WEBP. The format is detected by file content, not by
-extension.
+JPG, PNG, GIF (first frame), BMP, WEBP, SVG, SVGZ. The format is detected by file content,
+not by extension.
+
+SVG can be dropped at build time (`cargo build --release --no-default-features`), which takes
+the binary from ~3.5 MB to ~1.6 MB. Such a build does not recognize `.svg` at all.
+
+## SVG
+
+Vector documents are **re-rendered for the current zoom** rather than scaled from a fixed
+bitmap, so they stay sharp however far you zoom in — and only the visible part is rendered, so
+memory does not grow with the zoom level.
+
+- **Zoom stays responsive.** A fresh render runs in the background while the previous one is
+  stretched to stand in for it, so a complex drawing goes briefly soft and then snaps sharp
+  instead of freezing. Ordinary files render within a frame and never show the soft step.
+- **Opening size follows the file.** An SVG that states its size (`width="24"`) is shown at
+  that size, capped at 100% like any image; one that states none (`width="100%"`) is fitted to
+  the window, enlarging past 100% where a raster would not — there is no blurring to avoid.
+- **`Ctrl+C`** copies the image at the size the document declares, so a paste does not depend
+  on the zoom you happened to be at.
+- **No pixel grid**, and no nearest-neighbour step at high zoom: both mark out image pixels,
+  and a re-rendered vector has none.
+- **Text uses installed fonts.** A font the document asks for but the system lacks is
+  substituted, so text can differ from what its author saw. Loading the font database is
+  skipped entirely for documents without text, which is most of them.
+- **Not supported:** SMIL/CSS animation, scripting, `<foreignObject>`; filters only in part.
+  Exports from Figma, Illustrator and Inkscape render faithfully; animated web assets do not.
 
 ## Hotkey reference
 

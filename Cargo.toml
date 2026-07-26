@@ -5,6 +5,13 @@ edition = "2021"
 license = "MIT"
 description = "A fast, minimal image viewer for Windows, built for instant startup."
 
+[features]
+default = ["svg"]
+# SVG rendering (ADR 0016). Build with `--no-default-features` for a raster-only viewer:
+# that drops resvg together with its text/font machinery, measured at ~1.9 MB smaller.
+# Keep resvg's own default features — see ADR 0016 for why trimming them is a false economy.
+svg = ["dep:resvg", "dep:flate2"]
+
 [dependencies]
 winit = "0.29"
 softbuffer = "0.4"
@@ -12,6 +19,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rayon = "1"
 winreg = "0.52"
 notify = "8.2.0"
+resvg = { version = "0.47", optional = true }
+# usvg gunzips SVGZ internally but does not hand the text back, and the declared-size test
+# of ADR 0017 needs the raw root element. flate2 is already an unconditional usvg
+# dependency, so decompressing once ourselves costs no extra code size.
+flate2 = { version = "1", optional = true }
 
 [build-dependencies]
 winresource = "0.1"

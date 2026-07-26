@@ -1,0 +1,16 @@
+[package]
+name = "svg_start_trim"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.29"
+softbuffer = "0.4"
+rayon = "1"
+# Same spike as svg_start_resvg, but with resvg's fat default features off:
+#  - raster-images: gif/webp/jpeg decoders for <image> hrefs inside an SVG. vgiew already
+#    links the `image` crate for exactly those formats, so this is duplicated code —
+#    in a real integration a custom ImageHrefResolver would reuse `image` instead.
+#  - memmap-fonts: only affects how font files are read, not what is linked.
+# `text` + `system-fonts` are kept: SVGs with text are far too common to drop.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }

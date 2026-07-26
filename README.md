@@ -29,7 +29,8 @@ The whole design and the measurements behind the key decisions live in
 Fast startup and switching, fit-to-window, cursor-centered zoom and pan, crisp
 resampling, folder browsing in natural sort order, copy to clipboard (`Ctrl+C`, as
 both file and pixels), delete to the Recycle Bin, drag & drop to open, and fullscreen. Formats: JPG, PNG,
-GIF (first frame), BMP, WEBP, detected by content.
+GIF (first frame), BMP, WEBP, SVG/SVGZ, detected by content. SVG is re-rendered at every
+zoom level, so it stays sharp however far you zoom in.
 
 See **[docs/FEATURES.md](docs/FEATURES.md)** for the full feature list and hotkey reference.
 
@@ -42,6 +43,14 @@ tools (Visual Studio Build Tools).
 cargo build --release
 # run:
 target\release\vgiew.exe path\to\image.png
+```
+
+SVG support is a default feature. Turning it off drops the vector renderer and its text/font
+machinery, which takes the binary from ~3.5 MB to ~1.6 MB; SVG files are then not recognized
+at all, exactly like any other unsupported type:
+
+```powershell
+cargo build --release --no-default-features
 ```
 
 ## Install and bind to double-click

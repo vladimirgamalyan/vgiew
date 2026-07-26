@@ -58,6 +58,7 @@ The file type is determined by content (file signature), not just the extension.
 | Category | Formats |
 |----------|---------|
 | Images   | JPG, PNG, GIF (first frame), BMP, WEBP |
+| Vector   | SVG, SVGZ — added after the MVP, see ADR 0016/0017 and the cost measurements in section 7. Behind a default-on `svg` build feature. |
 
 Future (not in MVP): AVIF/HEIC/JXL.
 
@@ -261,6 +262,101 @@ Deferred, because:
 **Gate:** revisit only if a measurement on the real app shows that 4K fullscreen with active
 zoom is genuinely janky. And even then — add not a full second renderer, but an **optional
 fast GPU present** behind autodetection/a flag.
+
+### SVG support: cost measurements (2026-07-26)
+
+SVG is the one candidate format that cannot be added by enabling a feature on the `image`
+crate: it needs a vector renderer, and the only viable one on this stack is **resvg**
+(0.47, pure CPU via tiny-skia — no network, no scripting). `ID2D1SvgDocument` needs a
+Direct2D device (the ~150 ms GPU floor rejected above) and does not support `<text>` at
+all; WinRT `SvgImageSource` only renders through XAML. So the question is not *which*
+renderer but *whether the primary goal survives it*.
+
+Hardware as above. Spikes: `svg_start_baseline` / `svg_start_resvg` / `svg_start_trim`
+(one shared `main.rs`, so the feature set is the only variable), driven by
+`measure_svg.ps1` and `measure_svg_cold.ps1`.
+
+#### Does linking a vector renderer slow down startup?
+
+Wall-clock means, n=8, runs interleaved between binaries, shared DLLs warm throughout:
+
+| Binary | Size | Warm launch | New file | + cold pages |
+|--------|------|-------------|----------|--------------|
+| baseline (no SVG) | 385 KB | ~52 ms | 111.9 ms | 112.6 ms |
+| trim (resvg, lean features) | 2 196 KB | 52.1 ms | 167.0 ms | 169.5 ms |
+| resvg (default features) | 2 658 KB | 51.1 ms | 183.7 ms | 187.2 ms |
+
+Decomposed per binary — the two size-dependent effects, separated:
+
+| | new-file cost (scan − warm) | demand paging ((scan+io) − scan) |
+|---|---|---|
+| baseline | 48.8 ms | **0.7 ms** |
+| trim | 114.9 ms | **2.5 ms** |
+| resvg | 132.5 ms | **3.5 ms** |
+
+Conclusions:
+
+- **The normal launch does not get slower.** In the clean run (`measure_svg.ps1`, n=14)
+  the median moved 41.2 → 42.0 ms wall-clock and 26.6 → 27.5 ms first-frame — noise. The
+  imported-DLL set is byte-identical, so resvg adds no loader dependency.
+- **Faulting in the extra 2.3 MB costs ~3 ms** on this NVMe. Binary size is not the issue.
+- The whole remaining penalty is **Defender scanning a newly written executable**, and it
+  is paid **once per build/install**: running the same fresh copy repeatedly gives 188 ms,
+  then 49.8, then ~51 — back to warm from the second launch on. For a user that is one
+  slow launch after `install.ps1`.
+- **`first_frame_ms` is blind to all of this** — it is clocked from the start of `main`,
+  while loader and antivirus work happen before it. Internally the delta measured −2.6 ms
+  while externally it was +74.6 ms. Any future size-sensitive measurement must use the
+  external wall-clock.
+- **The apparent duplication with the `image` crate is not real.** resvg's `raster-images`
+  feature uses the same `gif` / `png` / `image-webp` / `zune-jpeg` versions `image` 0.25
+  does, and cargo unifies them (`cargo tree -d`: no duplicates). Measured on binaries that
+  link `image` exactly as vgiew does: `image` alone 774 KB, `image` + resvg (default
+  features) 2 677 KB, `image` + resvg without `raster-images` 2 487 KB. So adding resvg
+  costs **+1.86 MB** here rather than the +2.27 MB a codec-less spike suggested, and
+  dropping `raster-images` would save only 190 KB — roughly 7 ms of that one-time scan —
+  while making every SVG with an embedded bitmap render as a silent hole. Keep the defaults;
+  see ADR 0016 for why a custom `ImageHrefResolver` cannot recover this.
+
+#### What rendering an SVG actually costs
+
+Viewport 1600×1000, median of 3 after a warm-up render. Reference point for the same
+viewport: the **existing** raster path on a 24 MP JPEG is `decode 44 ms + pack 5 ms`
+(`vgiew --dump`, spread 0.2 ms over 4 runs).
+
+| File | parse | at fit | at 4× | 4× in 16 strips | to first pixels |
+|------|-------|--------|-------|-----------------|-----------------|
+| icon 24×24 (236 B) | 0.11 | 0.28 | 0.12 | 0.41 | **4.6 ms** |
+| logo 512², gradients | 0.19 | 9.16 | 29.68 | **3.77** | **10.8 ms** |
+| text 800×640 | 10.17 | 3.39 | 1.59 | 0.66 | **31.9 ms** |
+| illustration 1200², 2k paths | 4.03 | 53.55 | 156.38 | **20.81** | **59.0 ms** |
+| heavy 4000², 60k paths (10.9 MB) | 119.95 | 487.54 | 1476.67 | **150.07** | **610 ms** |
+
+Conclusions:
+
+- **A realistic SVG reaches first pixels faster than an ordinary photo** (4–32 ms vs the
+  49 ms already paid for a 24 MP JPEG). A 2000-path illustration is about par. Only
+  pathological files (tens of thousands of paths) are slow.
+- **Rendering only the viewport is what makes zoom tractable.** Cost tracks *visible*
+  complexity, and memory stays `ww*wh*4` at any zoom — whereas rasterizing the whole canvas
+  at scale would need 16 GB at 64× on a 1000² drawing.
+- **Strip tiling gives 8–10×.** `resvg::render` is single-threaded, but a strip is just a
+  shorter pixmap with a shifted transform, and rayon is already a dependency: 156 → 21 ms
+  turns zooming a real illustration interactive. On trivial files the dispatch overhead
+  dominates (0.12 → 0.41 ms), so tiling needs a complexity threshold.
+- **Cold system-font loading is the one ugly number: ~1692 ms** (673 files, 420 MB in
+  `C:\Windows\Fonts`); warm it is 15–18 ms. This is a single observation — the FS cache
+  cannot be flushed again without admin rights — so treat it as an order of magnitude.
+  Three things blunt it: a byte scan for `<text`/`<tspan` skips font loading entirely for
+  the common SVG (icons, logos, chart exports); it runs on the background decode thread
+  with the window already on screen; and it is paid once per OS boot.
+- Demultiplying 1.6 MP (tiny-skia premultiplied → straight `0xAARRGGBB`) costs 1.4 ms
+  single-threaded, and cannot be skipped — every antialiased edge would darken.
+
+**Verdict:** the primary goal survives. SVG costs nothing on a normal launch, one ~60 ms
+launch per install, and less time to first pixels than a photo for realistic files. What
+remains to decide is not performance but view semantics for a format with no natural pixel
+size — see the ADRs.
 
 ### Why Rust, not C++
 
