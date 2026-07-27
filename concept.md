@@ -410,7 +410,6 @@ To stay "fast and simple", the utility does **not**:
 - Editing, rotate-with-save, format conversion.
 - A gallery/thumbnail grid, cataloguing, tags.
 - A settings "kitchen sink", themes, plugins.
-- GIF animation and drag-and-drop into the window (deferred as out of scope).
 
 ---
 
@@ -426,7 +425,7 @@ To stay "fast and simple", the utility does **not**:
    (`F`/`Enter`/`Esc`), `0`/`1` (fit/100%).
    There is a headless `--dump <in> <out.png>` mode for render checks.
 2. **Polish:** ✔ Done: transparency checkerboard, neighbor prefetch,
-   parallel RGBA pack, natural sort. (GIF animation and drag-and-drop → non-goals.)
+   parallel RGBA pack, natural sort.
 3. **Optional:** reusing a single window on a repeated double-click
    (single-instance via a named pipe), extra formats.
    ✔ `--register`/`--unregister` + `install.ps1`/`uninstall.ps1` — already done

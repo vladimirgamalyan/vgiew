@@ -80,3 +80,7 @@ Before proposing or re-proposing a decision that feels debatable, check
   `[W×H]` and `Ctrl+C` for a format with no natural pixel size
 - [0018](0018-dropped-image-lands-like-a-browse-step.md) — A dropped image lands
   like a browse step, keeping the zoom
+- [0019](0019-animate-via-streaming-ring-buffer.md) — Animate GIF, APNG and WebP
+  from a streaming ring buffer
+- [0020](0020-playback-semantics-for-an-animated-file.md) — Pause, frame step,
+  `Ctrl+C` and the title for an animated file
