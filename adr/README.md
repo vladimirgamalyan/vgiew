@@ -81,6 +81,8 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0018](0018-dropped-image-lands-like-a-browse-step.md) — A dropped image lands
   like a browse step, keeping the zoom
 - [0019](0019-animate-via-streaming-ring-buffer.md) — Animate GIF, APNG and WebP
-  from a streaming ring buffer
+  from a streaming ring buffer (occlusion gating superseded by 0021)
 - [0020](0020-playback-semantics-for-an-animated-file.md) — Pause, frame step,
   `Ctrl+C` and the title for an animated file
+- [0021](0021-stop-playback-on-minimize-not-occlusion.md) — Stop playback on
+  minimize, because Windows never reports occlusion (supersedes 0019 point 9)

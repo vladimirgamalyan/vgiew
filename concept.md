@@ -57,7 +57,7 @@ The file type is determined by content (file signature), not just the extension.
 
 | Category | Formats |
 |----------|---------|
-| Images   | JPG, PNG, GIF (first frame), BMP, WEBP |
+| Images   | JPG, PNG, GIF, BMP, WEBP — animated GIF, APNG and WebP play, see ADR 0019/0020 |
 | Vector   | SVG, SVGZ — added after the MVP, see ADR 0016/0017 and the cost measurements in section 7. Behind a default-on `svg` build feature. |
 
 Future (not in MVP): AVIF/HEIC/JXL.
@@ -102,7 +102,8 @@ Behavior:
 - **Filtering by scale:** when zooming in (scale ≥ 1) — nearest-neighbor
   (crisp pixel edges, no blur, like other viewers); when zooming out (scale < 1) —
   bilinear (smoothing, no aliasing).
-- **Transparency** is drawn as a checkerboard. **GIF** shows its first frame only.
+- **Transparency** is drawn as a checkerboard. **Animated GIF, APNG and WebP** play,
+  with `Space` to pause and `.` to step one frame forward.
 - Window background — neutral dark.
 - Window title: file name, pixel size, current scale.
 

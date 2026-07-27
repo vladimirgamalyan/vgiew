@@ -4,6 +4,7 @@
 // Neighboring images are prefetched so browsing is instant.
 #![windows_subsystem = "windows"]
 
+mod anim;
 #[cfg(feature = "svg")]
 mod svg;
 
@@ -14,12 +15,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(feature = "svg")]
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{EventLoopBuilder, EventLoopProxy};
+use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen, Icon, WindowBuilder};
 
@@ -50,11 +51,13 @@ struct DecodedImage {
 }
 
 // What the viewer can show. A raster is its own pixels; a vector document keeps its parsed
-// tree and is rasterized on demand for the current viewport (ADR 0016).
+// tree and is rasterized on demand for the current viewport (ADR 0016); an animation is a
+// stream of rasters, of which one is on screen at a time (ADR 0019).
 enum Frame {
     Raster(DecodedImage),
     #[cfg(feature = "svg")]
     Vector(VectorFrame),
+    Animation(anim::Anim),
 }
 
 impl Frame {
@@ -65,6 +68,7 @@ impl Frame {
             Frame::Raster(im) => (im.w, im.h),
             #[cfg(feature = "svg")]
             Frame::Vector(v) => (v.doc.w, v.doc.h),
+            Frame::Animation(a) => a.size(),
         }
     }
 
@@ -73,7 +77,7 @@ impl Frame {
     // capping them at 1:1.
     fn has_natural_size(&self) -> bool {
         match self {
-            Frame::Raster(_) => true,
+            Frame::Raster(_) | Frame::Animation(_) => true,
             #[cfg(feature = "svg")]
             Frame::Vector(v) => v.doc.declared,
         }
@@ -140,6 +144,12 @@ enum UserEvent {
     // A worker finished rasterizing a vector document for one view; None if it could not.
     #[cfg(feature = "svg")]
     Rasterized { job: RasterJob, px: Option<Vec<u32>> },
+    // A frame the animation was waiting on has been decoded. Carries nothing: it exists to
+    // wake a loop that is asleep with no timer, and the wake-up recomputes what is due.
+    AnimFrame,
+    // The decoder has been through an animation once, so its frame count is now known and
+    // the title can report it.
+    AnimCounted,
     // Optional reuse mode: another process handed this window a file to open.
     Open(PathBuf),
     // The watched folder changed on disk (debounced); rebuild the sibling list.
@@ -271,14 +281,19 @@ fn load_app_icon() -> Option<Icon> {
     Icon::from_rgba(rgba.into_raw(), w, h).ok()
 }
 
-// Loads whatever `path` holds. The raster decoders run first and unchanged, so the common
-// case keeps exactly the I/O it always had; only a file they all reject is then offered to
-// the SVG parser, which costs one rejected header probe for a vector and nothing otherwise.
+// Loads whatever `path` holds. The animation probe comes first but is deliberately cheap: it
+// is a header flag for APNG and WebP, one frame's decode for a GIF, and for every other
+// format a rejected magic-byte read. So `load_rgba` still runs on an ordinary JPG or PNG
+// exactly as it always did, which is what keeps time-to-first-pixel where it was; only a file
+// both reject is then offered to the SVG parser.
 //
 // A vector is rasterized here too, not just parsed: parsing is the cheap half (0.1 ms for an
 // icon) while rasterizing is what costs, so handing back an unrasterized tree would leave the
 // window empty for exactly as long as the work it was meant to do in advance (ADR 0016).
 fn load_frame(path: &Path, view: DecodeView) -> Option<Frame> {
+    if let Some(a) = anim::open(path) {
+        return Some(Frame::Animation(a));
+    }
     if let Some(rgba) = load_rgba(path) {
         return Some(Frame::Raster(pack_rgba(&rgba)));
     }
@@ -429,6 +444,29 @@ fn ensure_raster(
     spawn_raster(v.doc.clone(), RasterJob { idx, path, view }, proxy.clone());
 }
 
+// Playback belongs to the file on screen and to no other: the current animation runs, and any
+// other one in the cache is torn down and rewound so it costs no more than a still image
+// (ADR 0019 point 10). Every path that can change `current` while the cache survives — a
+// decode landing, a browse step, a folder change — ends here, because an animation left
+// running under a new image is the one way this design comes apart. A dropped file needs no
+// call: it empties the cache, and dropping an animation is what stops its decoder.
+fn sync_playback(
+    cache: &mut HashMap<usize, Frame>,
+    current: usize,
+    now: Instant,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    for (&idx, frame) in cache.iter_mut() {
+        if let Frame::Animation(a) = frame {
+            if idx == current {
+                a.play(now, proxy);
+            } else {
+                a.stop();
+            }
+        }
+    }
+}
+
 // Keep only {prev, current, next} in the cache to bound memory (big images are ~w*h*4 bytes).
 fn evict(cache: &mut HashMap<usize, Frame>, current: usize, len: usize) {
     let (prev, next) = neighbors(current, len);
@@ -512,6 +550,10 @@ fn draw(frame: Option<&Frame>, buf: &mut [u32], ww: u32, wh: u32, scale: f32, cx
         Some(Frame::Raster(im)) => draw_raster(im, buf, ww, wh, scale, cx, cy),
         #[cfg(feature = "svg")]
         Some(Frame::Vector(v)) => draw_vector(v, buf, ww, wh, scale, cx, cy),
+        // An animation frame has real image pixels, so it goes through the raster path
+        // untouched — checkerboard, nearest/bilinear split and pixel grid included
+        // (ADR 0019 point 11).
+        Some(Frame::Animation(a)) => draw_raster(a.image(), buf, ww, wh, scale, cx, cy),
     }
 }
 
@@ -1676,6 +1718,13 @@ fn main() {
     let mut fit_mode = true;
     let mut fullscreen = false;
 
+    // Playback state. `paused` carries across a browse step, exactly as the zoom does: a user
+    // who stopped to inspect one frame is in an inspecting mood (ADR 0020 point 3).
+    // `was_stopped` remembers whether the clock was standing still last time round, so it can
+    // be re-based on the frame on screen when it starts again.
+    let mut paused = false;
+    let mut was_stopped = false;
+
     // Input.
     let mut mouse = (0.0f32, 0.0f32);
     let mut dragging = false;
@@ -1699,7 +1748,8 @@ fn main() {
                         img: Option<&Frame>,
                         scale: f32,
                         files: &[PathBuf],
-                        current: usize| {
+                        current: usize,
+                        paused: bool| {
         // No file at all (empty folder, or launched bare) — nothing is pending, so say
         // nothing rather than advertise a load that will never finish.
         let Some(path) = files.get(current) else {
@@ -1715,15 +1765,28 @@ fn main() {
         match img {
             Some(f) => {
                 let (iw, ih) = f.size();
+                // An animation reports its length, and while paused the frame being inspected
+                // as well. The index changes only on pause and on step, so playback never
+                // costs a `set_title` (ADR 0020 point 6). The count is missing only while the
+                // decoder is still on its first pass through a long file.
+                let play = match f {
+                    Frame::Animation(a) => match (paused, a.total()) {
+                        (false, Some(n)) => format!(", {n} frames"),
+                        (false, None) => ", animated".to_string(),
+                        (true, Some(n)) => format!(", frame {}/{n}", a.index() + 1),
+                        (true, None) => format!(", frame {}", a.index() + 1),
+                    },
+                    _ => String::new(),
+                };
                 window.set_title(&format!(
-                    "vgiew — {name}  [{iw}×{ih}]{size}  {:.0}%",
+                    "vgiew — {name}  [{iw}×{ih}{play}]{size}  {:.0}%",
                     scale * 100.0
                 ))
             }
             None => window.set_title(&format!("vgiew — {name}{size}  (loading…)")),
         }
     };
-    update_title(&window, None, scale, &files, current);
+    update_title(&window, None, scale, &files, current, paused);
 
     let apply_fit = |img: Option<&Frame>,
                      ww: u32,
@@ -1783,13 +1846,21 @@ fn main() {
                             // Carry zoom and pan: keep cx/cy, clamp to the new image.
                             clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                         }
-                        update_title(&window, cache.get(&current), scale, &files, current);
+                        update_title(&window, cache.get(&current), scale, &files, current, paused);
                         window.request_redraw();
                         // Current is on screen — now prefetch its neighbors.
                         let v = decode_view(&window, fit_mode, scale, cx, cy);
                         prefetch(current, &files, &cache, &mut inflight, &failed, v, &proxy);
                     }
                     evict(&mut cache, current, files.len());
+                    sync_playback(&mut cache, current, Instant::now(), &proxy);
+                }
+                UserEvent::AnimFrame => {
+                    // Nothing to do: the wake-up alone is the point, and `AboutToWait` runs
+                    // straight after it to see what is now due.
+                }
+                UserEvent::AnimCounted => {
+                    update_title(&window, cache.get(&current), scale, &files, current, paused);
                 }
                 #[cfg(feature = "svg")]
                 UserEvent::Rasterized { job, px } => {
@@ -1843,7 +1914,7 @@ fn main() {
                     inflight.remove(&idx);
                     failed.insert(idx);
                     if idx == current {
-                        update_title(&window, None, scale, &files, current);
+                        update_title(&window, None, scale, &files, current, paused);
                     }
                 }
                 UserEvent::FolderChanged => {
@@ -1897,7 +1968,8 @@ fn main() {
                         }
                         window.request_redraw();
                     }
-                    update_title(&window, cache.get(&current), scale, &files, current);
+                    sync_playback(&mut cache, current, Instant::now(), &proxy);
+                    update_title(&window, cache.get(&current), scale, &files, current, paused);
                 }
                 UserEvent::Open(path) => {
                     // A drop (or optional reuse mode) handed this window a file. Rebuild
@@ -1927,7 +1999,7 @@ fn main() {
                     if !files.is_empty() {
                         ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                     }
-                    update_title(&window, None, scale, &files, current);
+                    update_title(&window, None, scale, &files, current, paused);
                     // Bring this window to the front for the user who just opened the file.
                     window.set_minimized(false);
                     window.focus_window();
@@ -2004,7 +2076,7 @@ fn main() {
                             cy = sy - (mouse.1 - wh / 2.0) / scale;
                             clamp_center(&mut cx, &mut cy, scale, iw, ih, ww, wh);
                             fit_mode = false;
-                            update_title(&window, cache.get(&current), scale, &files, current);
+                            update_title(&window, cache.get(&current), scale, &files, current, paused);
                             window.request_redraw();
                         }
                     }
@@ -2031,6 +2103,12 @@ fn main() {
                             let owned;
                             let img = match cache.get(&current) {
                                 Some(Frame::Raster(im)) => Some(im),
+                                // The frame on screen, which `Space` and `.` make something
+                                // the user chose. This knowingly diverges from the vector
+                                // rule above: copying mid-playback is nondeterministic, but
+                                // the deterministic alternative would make pause useless for
+                                // the one task it is most wanted for (ADR 0020 point 5).
+                                Some(Frame::Animation(a)) => Some(a.image()),
                                 #[cfg(feature = "svg")]
                                 Some(Frame::Vector(v)) => {
                                     owned = v.doc.rasterize_document().map(|px| DecodedImage {
@@ -2068,15 +2146,16 @@ fn main() {
                                         // Carry zoom and pan: keep cx/cy, clamp to the new image.
                                         clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                                     }
-                                    update_title(&window, cache.get(&current), scale, &files, current);
+                                    update_title(&window, cache.get(&current), scale, &files, current, paused);
                                     window.request_redraw();
                                 } else {
                                     // Miss — kick off decode; keep the previous frame on screen until it arrives.
                                     ensure_decode(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
-                                    update_title(&window, None, scale, &files, current);
+                                    update_title(&window, None, scale, &files, current, paused);
                                 }
                                 prefetch(current, &files, &cache, &mut inflight, &failed, decode_view(&window, fit_mode, scale, cx, cy), &proxy);
                                 evict(&mut cache, current, files.len());
+                                sync_playback(&mut cache, current, Instant::now(), &proxy);
                             }
                         }
                         Key::Named(NamedKey::Delete) => {
@@ -2116,7 +2195,7 @@ fn main() {
                         Key::Character("0") => {
                             fit_mode = true;
                             apply_fit(cache.get(&current), size.width, size.height, &mut scale, &mut cx, &mut cy);
-                            update_title(&window, cache.get(&current), scale, &files, current);
+                            update_title(&window, cache.get(&current), scale, &files, current, paused);
                             window.request_redraw();
                         }
                         Key::Character("1") => {
@@ -2126,8 +2205,30 @@ fn main() {
                                 cy = ih as f32 / 2.0;
                                 clamp_center(&mut cx, &mut cy, scale, iw, ih, size.width as f32, size.height as f32);
                                 fit_mode = false;
-                                update_title(&window, cache.get(&current), scale, &files, current);
+                                update_title(&window, cache.get(&current), scale, &files, current, paused);
                                 window.request_redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            // Repeat would flip the state at the OS repeat rate. And on a
+                            // still image the key does nothing at all: a pause the user
+                            // cannot see is worse than a key that has no effect (ADR 0020).
+                            if key.repeat
+                                || !matches!(cache.get(&current), Some(Frame::Animation(_)))
+                            {
+                                return;
+                            }
+                            paused = !paused;
+                            update_title(&window, cache.get(&current), scale, &files, current, paused);
+                        }
+                        Key::Character(".") => {
+                            // One frame forward, and no way back: reaching an earlier frame
+                            // means decoding the file again (ADR 0020 point 2).
+                            if let Some(Frame::Animation(a)) = cache.get_mut(&current) {
+                                if a.step() {
+                                    update_title(&window, cache.get(&current), scale, &files, current, paused);
+                                    window.request_redraw();
+                                }
                             }
                         }
                         _ => {}
@@ -2160,6 +2261,38 @@ fn main() {
                 }
                 _ => {}
             },
+            // The only thing that ever makes this viewer non-idle. The timer is armed solely
+            // while an animation is current, on screen and playing; in every other case the
+            // loop goes back to sleep on `Wait`, exactly as it always did.
+            Event::AboutToWait => {
+                let mut due = None;
+                if let Some(Frame::Animation(a)) = cache.get_mut(&current) {
+                    // winit documents `Occluded` for this but never emits it on Windows, so
+                    // being hidden is asked about rather than waited for. One `IsIconic` per
+                    // frame catches a minimised window — though not one merely covered by
+                    // another, which is as far as the platform lets us go (ADR 0021).
+                    let stopped = paused || window.is_minimized().unwrap_or(false);
+                    let now = Instant::now();
+                    if !stopped {
+                        // Starting again picks up from the frame on screen rather than racing
+                        // through the ones nobody was watching.
+                        if was_stopped {
+                            a.resume(now);
+                        }
+                        if a.tick(now) {
+                            window.request_redraw();
+                        }
+                        due = a.deadline();
+                    }
+                    was_stopped = stopped;
+                }
+                elwt.set_control_flow(match due {
+                    Some(t) => ControlFlow::WaitUntil(t),
+                    // Either there is nothing playing, or playback has outrun the decoder — in
+                    // which case the frame's arrival wakes the loop instead of a deadline.
+                    None => ControlFlow::Wait,
+                });
+            }
             Event::LoopExiting => {
                 save_window_geometry(win_geom.0, win_geom.1, win_geom.2, win_geom.3);
             }

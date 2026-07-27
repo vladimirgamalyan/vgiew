@@ -16,7 +16,7 @@ switching**: everything below is built so that opening and browsing images stays
   image pixels. The line tint adapts to the underlying color so it stays visible. Not drawn
   for vector documents, which have no image pixels.
 - **Informative title:** `vgiew — name [W×H] size zoom%`, and `(loading…)` while a frame
-  is still decoding.
+  is still decoding. An animation adds its length — see [Animation](#animation).
 
 ## Navigation
 
@@ -53,6 +53,9 @@ Details:
 - **No visual feedback**, by design — nothing flashes or pops up.
 - If the frame is still decoding (a brief moment right after opening a large image), only
   the file is placed on the clipboard.
+- **What gets copied depends on the format.** A still image copies itself; an
+  [animation](#animation) copies the frame on screen, so pausing first is how you aim; an
+  [SVG](#svg) copies at the size the document declares, whatever the current zoom.
 - This runs **only on the key press**. It adds no work to opening or switching images, so it
   does not affect display or navigation speed.
 
@@ -80,11 +83,37 @@ Details:
 
 ## Supported formats
 
-JPG, PNG, GIF (first frame), BMP, WEBP, SVG, SVGZ. The format is detected by file content,
-not by extension.
+JPG, PNG, GIF, BMP, WEBP, SVG, SVGZ. The format is detected by file content, not by
+extension. GIF, APNG and WebP **animate** — see [Animation](#animation).
 
 SVG can be dropped at build time (`cargo build --release --no-default-features`), which takes
 the binary from ~3.5 MB to ~1.6 MB. Such a build does not recognize `.svg` at all.
+
+## Animation
+
+Animated **GIF**, **APNG** and **WebP** play on open. A file with a single frame is an
+ordinary still and costs nothing extra — no timer, no decoder, no memory.
+
+- **`Space`** pauses and resumes; **`.`** steps one frame forward. There is no step back:
+  frames in these formats are cumulative, so an earlier one can only be reached by playing
+  round again.
+- **Pause carries while browsing**, exactly as the zoom does. Arrowing onto another
+  animation finds it paused too; the title is the cue.
+- **The title reports the length** — `[500×500, 48 frames]` — and while paused, the frame
+  you are looking at: `[500×500, frame 12/48]`.
+- **`Ctrl+C` copies the frame on screen**, so `Space` + `.` + `Ctrl+C` is how you extract a
+  single frame. Copying without pausing gets whatever frame happened to be showing.
+- **Returning to a file starts it over.** Browsing away releases the decoder, so there is no
+  position left to resume from.
+- **Timing follows the file**, measured against one fixed clock so a long animation cannot
+  drift. A delay of 0 — which authors write for "as fast as possible" — plays at 100 ms, the
+  same normalisation every browser applies.
+- **Playback stops while the window is minimized**, and resumes from the frame it stopped on.
+- **Memory is bounded at 256 MB of decoded frames.** An ordinary animation fits entirely and
+  loops for free; a very large one (a 1080p screencast, say) streams instead, and will
+  visibly hitch once per loop where it has to start reading the file again.
+- Transparency, the zoom filtering and the pixel grid all work exactly as they do for a still
+  image — an animation frame is real image pixels.
 
 ## SVG
 
@@ -117,6 +146,8 @@ memory does not grow with the zoom level.
 | Left-drag | pan |
 | `0` | fit to window |
 | `1` | 100% (1:1) |
+| `Space` | pause / resume an animation (nothing on a still image) |
+| `.` | step one frame forward in an animation |
 | `Ctrl+C` | copy image to clipboard (as file **and** as pixels) |
 | `Del` | move image to the Recycle Bin, show the next |
 | `F` / `Enter` | toggle fullscreen |

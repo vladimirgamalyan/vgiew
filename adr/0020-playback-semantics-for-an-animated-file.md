@@ -1,6 +1,6 @@
 # 0020. Pause, frame step, `Ctrl+C` and the title for an animated file
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 

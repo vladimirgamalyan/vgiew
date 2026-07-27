@@ -1,6 +1,6 @@
 # 0019. Animate GIF, APNG and WebP from a streaming ring buffer
 
-Status: Proposed
+Status: Accepted (point 9 superseded by 0021)
 
 ## Context
 
