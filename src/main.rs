@@ -313,11 +313,11 @@ fn load_frame(path: &Path, view: DecodeView) -> Option<Frame> {
             img: DecodedImage { w: v.ww, h: v.wh, px },
             view: v,
         });
-        return Some(Frame::Vector(VectorFrame {
+        Some(Frame::Vector(VectorFrame {
             doc: Arc::new(doc),
             last,
             asked: None,
-        }));
+        }))
     }
     #[cfg(not(feature = "svg"))]
     {
@@ -1869,26 +1869,23 @@ fn main() {
                     // view it was rendered for is still the one being waited on.
                     if files.get(job.idx) == Some(&job.path) {
                         if let Some(Frame::Vector(v)) = cache.get_mut(&job.idx) {
+                            // A view that could not be rendered leaves `asked` where it is, so
+                            // the same impossible job is not re-requested by every redraw. Any
+                            // later view change replaces it.
                             if v.asked == Some(job.view) {
-                                match px {
-                                    Some(px) => {
-                                        v.asked = None;
-                                        v.last = Some(Rendered {
-                                            img: DecodedImage {
-                                                w: job.view.ww,
-                                                h: job.view.wh,
-                                                px,
-                                            },
-                                            view: job.view,
-                                        });
-                                        if job.idx == current {
-                                            window.request_redraw();
-                                        }
+                                if let Some(px) = px {
+                                    v.asked = None;
+                                    v.last = Some(Rendered {
+                                        img: DecodedImage {
+                                            w: job.view.ww,
+                                            h: job.view.wh,
+                                            px,
+                                        },
+                                        view: job.view,
+                                    });
+                                    if job.idx == current {
+                                        window.request_redraw();
                                     }
-                                    // Leave `asked` on the view that could not be rendered, so
-                                    // the same impossible job is not re-requested by every
-                                    // redraw. Any later view change replaces it.
-                                    None => {}
                                 }
                             }
                         }
