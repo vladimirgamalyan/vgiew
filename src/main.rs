@@ -805,6 +805,10 @@ fn shift_held() -> bool {
 // nothing happening.
 #[cfg(windows)]
 fn delegate_to_external_viewer(path: &Path) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
+    }
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
     let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\vgiew") else {
@@ -816,7 +820,18 @@ fn delegate_to_external_viewer(path: &Path) -> bool {
     if exe.trim().is_empty() {
         return false;
     }
-    std::process::Command::new(exe).arg(path).spawn().is_ok()
+    match std::process::Command::new(exe).arg(path).spawn() {
+        Ok(child) => {
+            // Otherwise the new window opens behind Explorer: we exit within milliseconds
+            // while the other viewer takes a second or more to show a window, by which
+            // time Explorer is the foreground process again and the viewer — its
+            // grandchild, not its child — has no right to come forward. Hand it the right
+            // we hold ourselves for having been launched from the foreground.
+            unsafe { AllowSetForegroundWindow(child.id()) };
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 // The work area (screen minus taskbar) of the monitor a window rect lands on, as
