@@ -1,0 +1,13 @@
+# Line endings. Text is stored as LF in the repository and checked out in the
+# platform's native form, so the result no longer depends on whatever
+# core.autocrlf each clone happens to have set.
+* text=auto
+
+# Windows-only scripts: CRLF in the working tree on every platform.
+*.ps1 text eol=crlf
+
+# Binary assets: never convert line endings, never diff as text. Both formats
+# contain stray CR bytes, so this states outright what Git would otherwise have
+# to infer.
+*.png binary
+*.ico binary
