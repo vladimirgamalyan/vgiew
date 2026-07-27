@@ -1,6 +1,6 @@
 # 0020. Pause, frame step, `Ctrl+C` and the title for an animated file
 
-Status: Accepted
+Status: Accepted (point 3 superseded by 0023 for a dropped file)
 
 ## Context
 

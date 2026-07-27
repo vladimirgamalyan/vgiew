@@ -86,3 +86,7 @@ Before proposing or re-proposing a decision that feels debatable, check
   `Ctrl+C` and the title for an animated file
 - [0021](0021-stop-playback-on-minimize-not-occlusion.md) — Stop playback on
   minimize, because Windows never reports occlusion (supersedes 0019 point 9)
+- [0022](0022-shift-at-launch-hands-the-file-to-another-viewer.md) — Shift held
+  at launch hands the file to another viewer
+- [0023](0023-a-dropped-file-starts-playing.md) — A dropped file starts playing,
+  even when the previous one was paused (supersedes 0020 point 3 for a drop)

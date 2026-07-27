@@ -75,11 +75,18 @@ Details:
   spawning a second process, which keeps subsequent opens fast.
 - **Drag & drop:** dropping an image on the window opens it there, like a double-click
   would, and switches browsing to that image's folder. Zoom and pan carry over just as
-  they do with `←` / `→`. Files that are not images (and folders) are ignored — the
-  current image stays on screen.
+  they do with `←` / `→`; a paused animation does not — the dropped file plays. Files that
+  are not images (and folders) are ignored — the current image stays on screen.
 - **Window position and size are remembered** between runs.
 - **File associations:** `install.ps1` registers vgiew so a double-click in Explorer opens
   it (see the README for setup).
+- **Hand a file to another viewer:** holding **`Shift`** over that double-click starts vgiew
+  only long enough to pass the file on — no window is created here. The viewer is named by
+  the registry value `ExternalViewer` under `HKCU\Software\vgiew` (a full path to an `.exe`,
+  e.g. `C:\Program Files\XnViewMP\xnviewmp.exe`); until it is set, the modifier does
+  nothing. Keep `Shift` down until the other viewer appears — Explorer does not pass the key
+  state to the program it launches, so vgiew reads the keyboard as it starts. If the viewer
+  cannot be started, the image opens in vgiew as usual.
 
 ## Supported formats
 
@@ -98,7 +105,8 @@ ordinary still and costs nothing extra — no timer, no decoder, no memory.
   frames in these formats are cumulative, so an earlier one can only be reached by playing
   round again.
 - **Pause carries while browsing**, exactly as the zoom does. Arrowing onto another
-  animation finds it paused too; the title is the cue.
+  animation finds it paused too; the title is the cue. **A dropped file is the exception**
+  and always starts playing — a file dragged onto the window is one you want to see move.
 - **The title reports the length** — `[500×500, 48 frames]` — and while paused, the frame
   you are looking at: `[500×500, frame 12/48]`.
 - **`Ctrl+C` copies the frame on screen**, so `Space` + `.` + `Ctrl+C` is how you extract a
