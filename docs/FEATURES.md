@@ -87,6 +87,11 @@ Details:
   nothing. Keep `Shift` down until the other viewer appears — Explorer does not pass the key
   state to the program it launches, so vgiew reads the keyboard as it starts. If the viewer
   cannot be started, the image opens in vgiew as usual.
+- **`X` hands the image already on screen** to that same viewer and closes vgiew — the
+  Shift-launch decision, made after looking at the image. The key is read by its position on
+  the keyboard, so it works on a non-Latin layout too, and only a bare press counts
+  (`Ctrl+X` does nothing). With no `ExternalViewer` set, or if it cannot be started, the key
+  does nothing and the window stays open.
 
 ## Supported formats
 
@@ -158,5 +163,6 @@ memory does not grow with the zoom level.
 | `.` | step one frame forward in an animation |
 | `Ctrl+C` | copy image to clipboard (as file **and** as pixels) |
 | `Del` | move image to the Recycle Bin, show the next |
+| `X` | hand the image to the external viewer and close (any layout) |
 | `F` / `Enter` | toggle fullscreen |
 | `Esc` | exit fullscreen / close |

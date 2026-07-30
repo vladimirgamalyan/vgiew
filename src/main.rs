@@ -781,11 +781,12 @@ fn save_window_geometry(x: i32, y: i32, w: u32, h: u32) {
     }
 }
 
-// ── Hand the file to another viewer (Shift held over the double-click) ──
+// ── Hand the file to another viewer ──
 // vgiew is the default handler for images, so an ordinary double-click in Explorer lands
 // here. Holding Shift means "not this one": the file goes to the viewer named by
 // HKCU\Software\vgiew, value `ExternalViewer` (the full path to an .exe), and vgiew exits
-// before it builds a window. With no value set, nothing changes (ADR 0022).
+// before it builds a window. With no value set, nothing changes (ADR 0022). The same
+// hand-off is what `X` does for the image already on screen (ADR 0024).
 
 #[cfg(windows)]
 fn shift_held() -> bool {
@@ -2186,6 +2187,25 @@ fn main() {
                                 None => None,
                             };
                             copy_to_clipboard(&window, &path, img);
+                        }
+                        return;
+                    }
+                    // X: hand the image on screen to the same external viewer a Shift-launch
+                    // would have used, and close this window (ADR 0024). Matched on the
+                    // physical key so the gesture survives a non-Latin layout, and on a bare
+                    // press so nothing collides with a future Ctrl+X. Auto-repeat is ignored:
+                    // a held key would spawn a second viewer while this one is closing.
+                    #[cfg(windows)]
+                    if key.physical_key == PhysicalKey::Code(KeyCode::KeyX)
+                        && modifiers.is_empty()
+                        && !key.repeat
+                    {
+                        // No viewer configured, or it could not be started: stay open. Closing
+                        // on a hand-off that never happened would just lose the image.
+                        if let Some(path) = files.get(current) {
+                            if delegate_to_external_viewer(path) {
+                                elwt.exit();
+                            }
                         }
                         return;
                     }

@@ -90,3 +90,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   at launch hands the file to another viewer
 - [0023](0023-a-dropped-file-starts-playing.md) — A dropped file starts playing,
   even when the previous one was paused (supersedes 0020 point 3 for a drop)
+- [0024](0024-x-hands-the-image-on-screen-to-the-external-viewer.md) — `X` hands the
+  image on screen to the external viewer and closes vgiew (extends 0022)
