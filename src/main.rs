@@ -822,17 +822,76 @@ fn delegate_to_external_viewer(path: &Path) -> bool {
         return false;
     }
     match std::process::Command::new(exe).arg(path).spawn() {
-        Ok(child) => {
-            // Otherwise the new window opens behind Explorer: we exit within milliseconds
-            // while the other viewer takes a second or more to show a window, by which
-            // time Explorer is the foreground process again and the viewer — its
-            // grandchild, not its child — has no right to come forward. Hand it the right
-            // we hold ourselves for having been launched from the foreground.
+        Ok(mut child) => {
+            // Otherwise the new window opens behind whatever was on screen: we exit long
+            // before the other viewer has a window, and by then the system has activated
+            // the next window — Explorer, or whatever was behind us — so the viewer has no
+            // right to come forward. Hand it the right we hold, and then, because that
+            // right does not survive the activation our own exit causes, wait for its
+            // window and bring it forward ourselves.
             unsafe { AllowSetForegroundWindow(child.id()) };
+            activate_viewer_window(&mut child);
             true
         }
         Err(_) => false,
     }
+}
+
+// Wait for the viewer to put up a window and make it the foreground one. This runs while we
+// still hold the right to set the foreground — as the foreground process ourselves (`X`), or
+// as a process the foreground Explorer started (Shift at launch) — which is what makes the
+// call legal; the right handed to the viewer above is dropped as soon as anything else is
+// activated, and our own exit does exactly that (ADR 0025). XnView MP was measured at
+// ~230 ms to a visible window, so the cap is generous; it exists so a viewer that never
+// shows one cannot keep vgiew alive.
+#[cfg(windows)]
+fn activate_viewer_window(child: &mut std::process::Child) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetForegroundWindow(hwnd: *mut core::ffi::c_void) -> i32;
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(hwnd) = visible_window_of_process(child.id()) {
+            unsafe { SetForegroundWindow(hwnd) };
+            return;
+        }
+        // Gone without a window of its own — a viewer that hands the file to an already
+        // running copy of itself and exits. There is nothing here to bring forward.
+        if matches!(child.try_wait(), Ok(Some(_))) || Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+// The first visible top-level window belonging to `pid`, if it has one yet.
+#[cfg(windows)]
+fn visible_window_of_process(pid: u32) -> Option<*mut core::ffi::c_void> {
+    use core::ffi::c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(cb: unsafe extern "system" fn(*mut c_void, isize) -> i32, lparam: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+    }
+    struct Search {
+        pid: u32,
+        found: *mut c_void,
+    }
+    unsafe extern "system" fn visit(hwnd: *mut c_void, lparam: isize) -> i32 {
+        let search = &mut *(lparam as *mut Search);
+        let mut owner = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut owner);
+        if owner == search.pid && IsWindowVisible(hwnd) != 0 {
+            search.found = hwnd;
+            return 0; // found it — stop enumerating
+        }
+        1
+    }
+    let mut search = Search { pid, found: core::ptr::null_mut() };
+    unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
+    (!search.found.is_null()).then_some(search.found)
 }
 
 // The work area (screen minus taskbar) of the monitor a window rect lands on, as

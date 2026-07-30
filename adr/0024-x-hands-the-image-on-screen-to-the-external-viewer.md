@@ -1,6 +1,7 @@
 # 0024. X hands the image on screen to the external viewer
 
-Status: Accepted
+Status: Accepted (the immediate-exit consequence superseded by 0025: we wait for
+the viewer's window and activate it)
 
 ## Context
 

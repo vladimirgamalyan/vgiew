@@ -1,6 +1,7 @@
 # 0022. Shift held at launch hands the file to another viewer
 
-Status: Accepted
+Status: Accepted (point 3 superseded by 0025: we wait for the viewer's window
+before returning)
 
 ## Context
 
