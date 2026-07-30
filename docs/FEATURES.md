@@ -80,18 +80,12 @@ Details:
 - **Window position and size are remembered** between runs.
 - **File associations:** `install.ps1` registers vgiew so a double-click in Explorer opens
   it (see the README for setup).
-- **Hand a file to another viewer:** holding **`Shift`** over that double-click starts vgiew
-  only long enough to pass the file on — no window is created here. The viewer is named by
-  the registry value `ExternalViewer` under `HKCU\Software\vgiew` (a full path to an `.exe`,
-  e.g. `C:\Program Files\XnViewMP\xnviewmp.exe`); until it is set, the modifier does
-  nothing. Keep `Shift` down until the other viewer appears — Explorer does not pass the key
-  state to the program it launches, so vgiew reads the keyboard as it starts. If the viewer
-  cannot be started, the image opens in vgiew as usual.
-- **`X` hands the image already on screen** to that same viewer and closes vgiew — the
-  Shift-launch decision, made after looking at the image. The key is read by its position on
-  the keyboard, so it works on a non-Latin layout too, and only a bare press counts
-  (`Ctrl+X` does nothing). With no `ExternalViewer` set, or if it cannot be started, the key
-  does nothing and the window stays open.
+- **Hand the image to another viewer (`X`):** the image on screen goes to the viewer named
+  by the registry value `ExternalViewer` under `HKCU\Software\vgiew` (a full path to an
+  `.exe`, e.g. `C:\Program Files\XnViewMP\xnviewmp.exe`), which comes up in front, and vgiew
+  closes. Until that value is set the key does nothing; the same goes for a path that cannot
+  be started, and the window stays open. The key is read by its position on the keyboard, so
+  it works on a non-Latin layout too, and only a bare press counts (`Ctrl+X` does nothing).
 
 ## Supported formats
 

@@ -87,7 +87,8 @@ Before proposing or re-proposing a decision that feels debatable, check
 - [0021](0021-stop-playback-on-minimize-not-occlusion.md) — Stop playback on
   minimize, because Windows never reports occlusion (supersedes 0019 point 9)
 - [0022](0022-shift-at-launch-hands-the-file-to-another-viewer.md) — Shift held
-  at launch hands the file to another viewer (point 3 superseded by 0025)
+  at launch hands the file to another viewer (superseded by 0026; point 3 had been
+  superseded by 0025)
 - [0023](0023-a-dropped-file-starts-playing.md) — A dropped file starts playing,
   even when the previous one was paused (supersedes 0020 point 3 for a drop)
 - [0024](0024-x-hands-the-image-on-screen-to-the-external-viewer.md) — `X` hands the
@@ -95,3 +96,5 @@ Before proposing or re-proposing a decision that feels debatable, check
   immediate-exit consequence superseded by 0025)
 - [0025](0025-wait-for-the-delegated-viewer-window-and-activate-it.md) — Wait for the
   delegated viewer's window and activate it ourselves (supersedes 0022 point 3)
+- [0026](0026-drop-the-shift-at-launch-hand-off.md) — Drop the Shift-at-launch
+  hand-off; `X` is the only one (supersedes 0022)

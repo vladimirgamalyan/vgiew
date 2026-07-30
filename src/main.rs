@@ -782,28 +782,13 @@ fn save_window_geometry(x: i32, y: i32, w: u32, h: u32) {
 }
 
 // ── Hand the file to another viewer ──
-// vgiew is the default handler for images, so an ordinary double-click in Explorer lands
-// here. Holding Shift means "not this one": the file goes to the viewer named by
-// HKCU\Software\vgiew, value `ExternalViewer` (the full path to an .exe), and vgiew exits
-// before it builds a window. With no value set, nothing changes (ADR 0022). The same
-// hand-off is what `X` does for the image already on screen (ADR 0024).
-
-#[cfg(windows)]
-fn shift_held() -> bool {
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetAsyncKeyState(v_key: i32) -> i16;
-    }
-    const VK_SHIFT: i32 = 0x10;
-    // Asks for the physical key state, which needs neither focus nor a message queue —
-    // this process has just started and has neither. Bit 0x8000 is "down right now"; the
-    // low bit ("pressed since the last call") means nothing on a first-ever call.
-    unsafe { GetAsyncKeyState(VK_SHIFT) as u16 & 0x8000 != 0 }
-}
+// `X` sends the image on screen to the viewer named by HKCU\Software\vgiew, value
+// `ExternalViewer` (the full path to an .exe), and closes vgiew. With no value set the key
+// does nothing. This is the only way in: reading Shift at startup, so a modified
+// double-click in Explorer never opened a window here, was dropped (ADR 0026).
 
 // True once the other viewer is running with the file. False — no viewer configured, or it
-// could not be started — leaves the file to be opened here, so the gesture never ends in
-// nothing happening.
+// could not be started — leaves the image where it is, so the key is never a half-action.
 #[cfg(windows)]
 fn delegate_to_external_viewer(path: &Path) -> bool {
     #[link(name = "user32")]
@@ -838,12 +823,11 @@ fn delegate_to_external_viewer(path: &Path) -> bool {
 }
 
 // Wait for the viewer to put up a window and make it the foreground one. This runs while we
-// still hold the right to set the foreground — as the foreground process ourselves (`X`), or
-// as a process the foreground Explorer started (Shift at launch) — which is what makes the
-// call legal; the right handed to the viewer above is dropped as soon as anything else is
-// activated, and our own exit does exactly that (ADR 0025). XnView MP was measured at
-// ~230 ms to a visible window, so the cap is generous; it exists so a viewer that never
-// shows one cannot keep vgiew alive.
+// are still the foreground process — the user just pressed `X` in our own window — which is
+// what makes the call legal; the right handed to the viewer above is dropped as soon as
+// anything else is activated, and our own exit does exactly that (ADR 0025). XnView MP was
+// measured at ~230 ms to a visible window, so the cap is generous; it exists so a viewer
+// that never shows one cannot keep vgiew alive.
 #[cfg(windows)]
 fn activate_viewer_window(child: &mut std::process::Child) {
     #[link(name = "user32")]
@@ -1718,16 +1702,6 @@ fn main() {
     // find the opened file. An absolute arg makes both agree.
     let arg: Option<PathBuf> = args.get(1).map(|a| absolutize(Path::new(a)));
 
-    // Shift held over the double-click that launched us: hand the file to the configured
-    // viewer and exit without ever building a window. Checked before the reuse hand-off
-    // below so a running vgiew cannot swallow a file that was meant for the other viewer.
-    #[cfg(windows)]
-    if let Some(a) = &arg {
-        if shift_held() && delegate_to_external_viewer(a) {
-            return;
-        }
-    }
-
     // Optional reuse mode: if re-enabled, a file launch can hand its path to a
     // running viewer and exit instead of opening a second window.
     #[cfg(windows)]
@@ -2249,11 +2223,11 @@ fn main() {
                         }
                         return;
                     }
-                    // X: hand the image on screen to the same external viewer a Shift-launch
-                    // would have used, and close this window (ADR 0024). Matched on the
-                    // physical key so the gesture survives a non-Latin layout, and on a bare
-                    // press so nothing collides with a future Ctrl+X. Auto-repeat is ignored:
-                    // a held key would spawn a second viewer while this one is closing.
+                    // X: hand the image on screen to the external viewer and close this
+                    // window (ADR 0024). Matched on the physical key so the gesture survives
+                    // a non-Latin layout, and on a bare press so nothing collides with a
+                    // future Ctrl+X. Auto-repeat is ignored: a held key would spawn a second
+                    // viewer while this one is closing.
                     #[cfg(windows)]
                     if key.physical_key == PhysicalKey::Code(KeyCode::KeyX)
                         && modifiers.is_empty()

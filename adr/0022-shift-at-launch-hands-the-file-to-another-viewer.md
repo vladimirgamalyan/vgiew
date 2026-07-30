@@ -1,7 +1,7 @@
 # 0022. Shift held at launch hands the file to another viewer
 
-Status: Accepted (point 3 superseded by 0025: we wait for the viewer's window
-before returning)
+Status: Superseded by 0026 (the gesture is removed; `X` of 0024 replaces it.
+Point 3 had already been superseded by 0025)
 
 ## Context
 
